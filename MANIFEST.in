@@ -1,0 +1,10 @@
+graft cli
+prune .venv
+prune extensions
+prune gateway
+prune internal
+prune node_modules
+prune test
+prune .git
+prune .github
+prune .pytest_cache

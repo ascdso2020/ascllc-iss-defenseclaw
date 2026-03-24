@@ -1,36 +1,48 @@
 package gateway
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health *SidecarHealth
-	client *Client
-	store  *audit.Store
-	logger *audit.Logger
-	addr   string
+	health      *SidecarHealth
+	client      *Client
+	store       *audit.Store
+	logger      *audit.Logger
+	addr        string
+	scannerCfg  *config.Config
 }
 
 // NewAPIServer creates the REST API server bound to the given address.
-func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger) *APIServer {
-	return &APIServer{
+func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *audit.Store, logger *audit.Logger, cfg ...*config.Config) *APIServer {
+	s := &APIServer{
 		addr:   addr,
 		health: health,
 		client: client,
 		store:  store,
 		logger: logger,
 	}
+	if len(cfg) > 0 {
+		s.scannerCfg = cfg[0]
+	}
+	return s
 }
 
 // Run starts the HTTP server and blocks until ctx is cancelled.
@@ -43,6 +55,8 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/config/patch", a.handleConfigPatch)
 	mux.HandleFunc("/skills", a.handleSkills)
 	mux.HandleFunc("/tools/catalog", a.handleToolsCatalog)
+	mux.HandleFunc("/v1/skill/scan", a.handleSkillScan)
+	mux.HandleFunc("/v1/skill/fetch", a.handleSkillFetch)
 
 	srv := &http.Server{
 		Addr:    a.addr,
@@ -260,6 +274,149 @@ func (a *APIServer) handleToolsCatalog(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/skill/scan — run skill scanner on a local path (Option 2: remote scan)
+// ---------------------------------------------------------------------------
+
+type skillScanRequest struct {
+	Target string `json:"target"`
+	Name   string `json:"name"`
+}
+
+func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req skillScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Target == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
+	}
+
+	// Verify target exists on this host.
+	// If the path doesn't exist locally, the scanner will fail with a clear
+	// error — we still attempt the scan so that when the sidecar runs on the
+	// same host as OpenClaw (the intended remote deployment), it works.
+	if info, err := os.Stat(req.Target); err != nil || !info.IsDir() {
+		// Log a warning but proceed — the scanner will produce the definitive error.
+		fmt.Fprintf(os.Stderr, "[api] warning: target directory not found locally: %s\n", req.Target)
+	}
+
+	if a.scannerCfg == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "scanner not configured"})
+		return
+	}
+
+	ss := scanner.NewSkillScanner(a.scannerCfg.Scanners.SkillScanner)
+
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+
+	result, err := ss.Scan(ctx, req.Target)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	_ = a.logger.LogAction("api-skill-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+
+	a.writeJSON(w, http.StatusOK, result)
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/skill/fetch — tar.gz a skill directory and stream it back
+// ---------------------------------------------------------------------------
+
+type skillFetchRequest struct {
+	Target string `json:"target"`
+}
+
+func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req skillFetchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Target == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
+	}
+
+	info, err := os.Stat(req.Target)
+	if err != nil || !info.IsDir() {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("target directory not found: %s", req.Target),
+		})
+		return
+	}
+
+	_ = a.logger.LogAction("api-skill-fetch", req.Target, "streaming skill tar.gz")
+
+	w.Header().Set("Content-Type", "application/gzip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(req.Target)+".tar.gz"))
+	w.WriteHeader(http.StatusOK)
+
+	gw := gzip.NewWriter(w)
+	defer gw.Close()
+	tw := tar.NewWriter(gw)
+	defer tw.Close()
+
+	base := req.Target
+	_ = filepath.Walk(base, func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return nil // skip unreadable files
+		}
+
+		// Skip node_modules and .git
+		name := fi.Name()
+		if fi.IsDir() && (name == "node_modules" || name == ".git") {
+			return filepath.SkipDir
+		}
+
+		rel, _ := filepath.Rel(base, path)
+		if rel == "." {
+			return nil
+		}
+
+		// Sanitise: prevent path traversal in archive
+		if strings.Contains(rel, "..") {
+			return nil
+		}
+
+		header, err := tar.FileInfoHeader(fi, "")
+		if err != nil {
+			return nil
+		}
+		header.Name = rel
+
+		if err := tw.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if fi.Mode().IsRegular() {
+			f, err := os.Open(path)
+			if err != nil {
+				return nil
+			}
+			defer f.Close()
+			_, _ = io.Copy(tw, f)
+		}
+
+		return nil
+	})
 }
 
 func (a *APIServer) writeJSON(w http.ResponseWriter, status int, v interface{}) {

@@ -296,19 +296,42 @@ def _print_skill_list_table(
 @click.argument("target")
 @click.option("--json", "as_json", is_flag=True, help="Output scan results as JSON")
 @click.option("--path", "scan_path", default="", help="Override skill directory path")
+@click.option("--remote", is_flag=True, help="Scan via sidecar API (for skills on a remote host)")
 @pass_ctx
-def scan(app: AppContext, target: str, as_json: bool, scan_path: str) -> None:
-    """Scan a skill by name, path, or 'all' for all configured skills.
+def scan(app: AppContext, target: str, as_json: bool, scan_path: str, remote: bool) -> None:
+    """Scan a skill by name, path, URL, or 'all' for all configured skills.
 
-    Uses the native cisco-ai-skill-scanner SDK.
+    Uses the native cisco-ai-skill-scanner SDK for local scans.
+
+    Remote scanning (--remote):
+      When the sidecar runs on a remote host (e.g. via SSM port-forward),
+      pass --remote to send the scan request to the sidecar API instead of
+      running the scanner locally.
+
+    URL targets (fetch-to-temp):
+      Pass an https:// URL or clawhub:// URI to download a skill package
+      to a temp directory, scan it locally, then clean up. This lets you
+      pre-screen skills before installing them.
+
+      Examples:
+        defenseclaw skill scan https://example.com/skills/my-skill.tar.gz
+        defenseclaw skill scan clawhub://my-skill@1.2.3
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
+    # URL target → fetch-to-temp scan (Option 3)
+    if _is_url_target(target):
+        _scan_from_url(app, target, as_json)
+        return
+
     scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner)
 
     if target == "all":
-        _scan_all(app, scanner, as_json)
+        if remote:
+            _scan_all_remote(app, as_json)
+        else:
+            _scan_all(app, scanner, as_json)
         return
 
     # Resolve scan directory
@@ -322,12 +345,19 @@ def scan(app: AppContext, target: str, as_json: bool, scan_path: str) -> None:
             if resolved:
                 scan_dir = resolved
 
-    if not scan_dir:
+    if not scan_dir and not remote:
         click.echo(f"error: could not resolve skill {target!r} — use --path to specify manually", err=True)
         raise SystemExit(1)
 
+    name = os.path.basename(scan_dir) if scan_dir else target
+
+    # --remote: delegate scan to sidecar API — skip local policy checks
+    # since enforcement runs on the remote host.
+    if remote:
+        _scan_via_sidecar(app, target=scan_dir or target, name=name, as_json=as_json)
+        return
+
     pe = PolicyEngine(app.store)
-    name = os.path.basename(scan_dir)
 
     if pe.is_blocked("skill", name):
         click.echo(f"BLOCKED: {name} — remove from block list first")
@@ -437,6 +467,294 @@ def _resolve_path(app: AppContext, target: str) -> str | None:
     for candidate in app.cfg.installed_skill_candidates(target):
         if os.path.isdir(candidate):
             return candidate
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Option 2: Remote scan via sidecar API
+# ---------------------------------------------------------------------------
+
+def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) -> None:
+    """Send a scan request to the sidecar REST API (POST /v1/skill/scan).
+
+    Used when DefenseClaw sidecar runs on a remote host and the CLI connects
+    via SSM port-forward or direct network access.
+    """
+    from defenseclaw.gateway import OrchestratorClient
+
+    client = OrchestratorClient(
+        host=app.cfg.gateway.host,
+        port=app.cfg.gateway.api_port,
+    )
+
+    if not as_json:
+        click.echo(f"[scan] remote skill-scanner via sidecar -> {target}")
+
+    try:
+        data = client.scan_skill(target=target, name=name)
+    except Exception as exc:
+        click.echo(f"error: remote scan failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if as_json:
+        click.echo(json.dumps(data, indent=2, default=str))
+        return
+
+    findings = data.get("findings") or data.get("Findings") or []
+    max_sev = data.get("max_severity", "INFO")
+    click.echo(f"  Skill:    {name}")
+    click.echo(f"  Target:   {target} (remote)")
+    click.echo(f"  Findings: {len(findings)}")
+
+    if not findings:
+        click.secho("  Verdict:  CLEAN", fg="green")
+    else:
+        color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(max_sev, "white")
+        click.secho(f"  Verdict:  {max_sev} ({len(findings)} findings)", fg=color)
+        click.echo()
+        for f in findings:
+            sev = f.get("severity") or f.get("Severity") or "INFO"
+            title = f.get("title") or f.get("Title") or ""
+            sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(sev, "white")
+            click.secho(f"    [{sev}]", fg=sev_color, nl=False)
+            click.echo(f" {title}")
+
+
+def _scan_all_remote(app: AppContext, as_json: bool) -> None:
+    """Scan all skills via the sidecar API."""
+    oc_list = _list_openclaw_skills_full(app)
+    if not oc_list or not oc_list.get("skills"):
+        click.echo("No skills found via sidecar.")
+        return
+
+    for s in oc_list["skills"]:
+        name = s.get("name", "")
+        base_dir = s.get("baseDir") or s.get("filePath") or ""
+        if not base_dir:
+            click.echo(f"[scan] warning: no path for {name}", err=True)
+            continue
+        _scan_via_sidecar(app, target=base_dir, name=name, as_json=as_json)
+        if not as_json:
+            click.echo()
+
+
+# ---------------------------------------------------------------------------
+# Option 3: Fetch-to-temp scan (URL / registry targets)
+# ---------------------------------------------------------------------------
+
+def _is_url_target(target: str) -> bool:
+    """Check if the target is a URL or registry reference."""
+    return target.startswith("https://") or target.startswith("http://") or target.startswith("clawhub://")
+
+
+def _scan_from_url(app: AppContext, url: str, as_json: bool) -> None:
+    """Fetch a skill and scan locally, then clean up.
+
+    Supports two schemes:
+      clawhub://name[@version]  — uses `npx clawhub install` into a temp dir
+      https://...               — downloads a .tar.gz or .zip archive
+    """
+    if url.startswith("clawhub://"):
+        _scan_from_clawhub(app, url, as_json)
+    else:
+        _scan_from_http(app, url, as_json)
+
+
+def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
+    """Download a skill from the npm registry, scan locally, then clean up.
+
+    Skills are bundled inside the 'openclaw' npm package at skills/<name>/.
+    Flow: fetch openclaw tarball from npm → extract skills/<name>/ → scan → delete.
+    """
+    import shutil
+    import tempfile
+
+    import requests
+
+    from defenseclaw.scanner.skill import SkillScannerWrapper
+
+    name, _version = _parse_clawhub_uri(uri)
+    if not name:
+        click.echo(f"error: invalid clawhub URI: {uri}", err=True)
+        raise SystemExit(1)
+
+    if not as_json:
+        click.echo(f"[scan] fetching skill {name!r} from openclaw registry ...")
+
+    # Get the tarball URL from npm
+    try:
+        meta = requests.get("https://registry.npmjs.org/openclaw/latest", timeout=30).json()
+        tarball_url = meta.get("dist", {}).get("tarball")
+    except requests.RequestException as exc:
+        click.echo(f"error: npm registry lookup failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if not tarball_url:
+        click.echo("error: could not resolve openclaw tarball URL from npm", err=True)
+        raise SystemExit(1)
+
+    if not as_json:
+        click.echo(f"[scan] downloading {tarball_url}")
+
+    tmpdir = tempfile.mkdtemp(prefix="defenseclaw-clawhub-")
+    try:
+        resp = requests.get(tarball_url, timeout=120, stream=True)
+        resp.raise_for_status()
+
+        archive_path = os.path.join(tmpdir, "openclaw.tgz")
+        with open(archive_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                f.write(chunk)
+
+        if not as_json:
+            size_mb = os.path.getsize(archive_path) / (1024 * 1024)
+            click.echo(f"[scan] downloaded {size_mb:.1f} MB, extracting skill {name!r} ...")
+
+        skill_prefix = f"package/skills/{name}/"
+        skill_dir = os.path.join(tmpdir, "skill")
+        os.makedirs(skill_dir, exist_ok=True)
+
+        # Use a single tar command to extract only the skill subdirectory.
+        # Avoids iterating all ~5000 members in Python which causes resource
+        # exhaustion on macOS (fork bomb via VSCode shell integration hooks).
+        import subprocess
+        tar_result = subprocess.run(
+            [
+                "tar", "xzf", archive_path,
+                "-C", skill_dir,
+                "--strip-components=3",
+                skill_prefix,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+
+        os.unlink(archive_path)  # free disk immediately
+
+        found = tar_result.returncode == 0 and os.listdir(skill_dir)
+
+        if not found:
+            click.echo(f"error: skill {name!r} not found in openclaw package", err=True)
+            raise SystemExit(1)
+
+        if not as_json:
+            click.echo(f"[scan] skill-scanner -> {skill_dir}")
+
+        scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner)
+        result = scanner.scan(skill_dir)
+
+        if app.logger:
+            app.logger.log_scan(result)
+
+        if as_json:
+            click.echo(result.to_json())
+        else:
+            _print_result(name, result)
+
+    except requests.RequestException as exc:
+        click.echo(f"error: download failed: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        if not as_json:
+            click.echo("[scan] cleaned up temporary files")
+
+
+def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
+    """Download a skill archive from HTTP(S), extract, scan, then clean up."""
+    import shutil
+    import tarfile
+    import tempfile
+    import zipfile
+
+    import requests
+
+    from defenseclaw.scanner.skill import SkillScannerWrapper
+
+    if not as_json:
+        click.echo(f"[scan] fetching skill from {url}")
+
+    tmpdir = tempfile.mkdtemp(prefix="defenseclaw-skill-")
+    try:
+        resp = requests.get(url, timeout=60, stream=True)
+        resp.raise_for_status()
+
+        download_path = os.path.join(tmpdir, "download")
+        with open(download_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        extract_dir = os.path.join(tmpdir, "skill")
+        os.makedirs(extract_dir, exist_ok=True)
+
+        if tarfile.is_tarfile(download_path):
+            with tarfile.open(download_path) as tf:
+                tf.extractall(extract_dir, filter="data")
+        elif zipfile.is_zipfile(download_path):
+            with zipfile.ZipFile(download_path) as zf:
+                zf.extractall(extract_dir)
+        else:
+            click.echo("error: unsupported archive format (expected .tar.gz or .zip)", err=True)
+            raise SystemExit(1)
+
+        entries = os.listdir(extract_dir)
+        skill_dir = extract_dir
+        if len(entries) == 1:
+            single = os.path.join(extract_dir, entries[0])
+            if os.path.isdir(single):
+                skill_dir = single
+
+        name = os.path.basename(skill_dir)
+        if not as_json:
+            click.echo(f"[scan] skill-scanner -> {skill_dir} (fetched)")
+
+        scanner = SkillScannerWrapper(app.cfg.scanners.skill_scanner)
+        result = scanner.scan(skill_dir)
+
+        if app.logger:
+            app.logger.log_scan(result)
+
+        if as_json:
+            click.echo(result.to_json())
+        else:
+            _print_result(name, result)
+
+    except requests.RequestException as exc:
+        click.echo(f"error: download failed: {exc}", err=True)
+        raise SystemExit(1)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _parse_clawhub_uri(uri: str) -> tuple[str, str | None]:
+    """Parse clawhub://name[@version] → (name, version or None)."""
+    path = uri.removeprefix("clawhub://")
+    if not path:
+        return ("", None)
+
+    if "@" in path:
+        name, version = path.split("@", 1)
+        return (name, version)
+    return (path, None)
+
+
+def _find_skill_in_dir(base: str, skill_name: str) -> str | None:
+    """Find the skill directory after clawhub install."""
+    # Direct match
+    candidate = os.path.join(base, skill_name)
+    if os.path.isdir(candidate):
+        return candidate
+
+    # Might be inside a skills/ subdirectory
+    candidate = os.path.join(base, "skills", skill_name)
+    if os.path.isdir(candidate):
+        return candidate
+
+    # Check if there's a SKILL.md anywhere
+    for root, dirs, files in os.walk(base):
+        if "SKILL.md" in files:
+            return root
+        dirs[:] = [d for d in dirs if d != "node_modules"]
+
     return None
 
 

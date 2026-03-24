@@ -262,7 +262,7 @@ func (s *Sidecar) handleAdmissionResult(r watcher.AdmissionResult) {
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	addr := fmt.Sprintf("127.0.0.1:%d", s.cfg.Gateway.APIPort)
-	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger)
+	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	return api.Run(ctx)
 }
 

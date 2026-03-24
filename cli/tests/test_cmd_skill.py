@@ -342,5 +342,148 @@ class TestBuildActionsMap(SkillCommandTestBase):
         self.assertIn("bad-skill", actions_map)
 
 
+class TestSkillScanRemote(SkillCommandTestBase):
+    """Tests for remote scan via sidecar API."""
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.gateway.OrchestratorClient.scan_skill")
+    def test_scan_remote_returns_results(self, mock_scan_skill, _mock_info):
+        skill_dir = os.path.join(self.tmp_dir, "remote-skill")
+        os.makedirs(skill_dir)
+
+        mock_scan_skill.return_value = {
+            "scanner": "skill-scanner",
+            "target": "/home/ubuntu/.openclaw/skills/remote-skill",
+            "findings": [
+                {"severity": "HIGH", "title": "Shell injection", "id": "f1"},
+            ],
+            "max_severity": "HIGH",
+        }
+
+        result = self.invoke(["scan", "remote-skill", "--path", skill_dir, "--remote"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("remote", result.output)
+        self.assertIn("HIGH", result.output)
+        self.assertIn("Shell injection", result.output)
+        mock_scan_skill.assert_called_once()
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.gateway.OrchestratorClient.scan_skill")
+    def test_scan_remote_clean(self, mock_scan_skill, _mock_info):
+        skill_dir = os.path.join(self.tmp_dir, "clean-remote")
+        os.makedirs(skill_dir)
+
+        mock_scan_skill.return_value = {
+            "scanner": "skill-scanner",
+            "target": skill_dir,
+            "findings": [],
+            "max_severity": "INFO",
+        }
+
+        result = self.invoke(["scan", "clean-remote", "--path", skill_dir, "--remote"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("CLEAN", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.gateway.OrchestratorClient.scan_skill")
+    def test_scan_remote_json_output(self, mock_scan_skill, _mock_info):
+        skill_dir = os.path.join(self.tmp_dir, "json-remote")
+        os.makedirs(skill_dir)
+
+        expected = {
+            "scanner": "skill-scanner",
+            "target": skill_dir,
+            "findings": [],
+        }
+        mock_scan_skill.return_value = expected
+
+        result = self.invoke(["scan", "json-remote", "--path", skill_dir, "--remote", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        self.assertEqual(data["scanner"], "skill-scanner")
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.gateway.OrchestratorClient.scan_skill", side_effect=Exception("connection refused"))
+    def test_scan_remote_failure(self, _mock_scan, _mock_info):
+        skill_dir = os.path.join(self.tmp_dir, "fail-remote")
+        os.makedirs(skill_dir)
+
+        result = self.invoke(["scan", "fail-remote", "--path", skill_dir, "--remote"])
+        self.assertNotEqual(result.exit_code, 0)
+
+
+class TestSkillScanURL(SkillCommandTestBase):
+    """Tests for fetch-to-temp scan from URL."""
+
+    def test_is_url_target(self):
+        from defenseclaw.commands.cmd_skill import _is_url_target
+
+        self.assertTrue(_is_url_target("https://example.com/skill.tar.gz"))
+        self.assertTrue(_is_url_target("http://example.com/skill.tar.gz"))
+        self.assertTrue(_is_url_target("clawhub://my-skill@1.2.3"))
+        self.assertFalse(_is_url_target("my-skill"))
+        self.assertFalse(_is_url_target("/path/to/skill"))
+
+    def test_resolve_clawhub_url(self):
+        from defenseclaw.commands.cmd_skill import _resolve_clawhub_url
+
+        self.assertEqual(
+            _resolve_clawhub_url("clawhub://my-skill@1.2.3"),
+            "https://clawhub.ai/api/skills/my-skill/1.2.3/download",
+        )
+
+    def test_resolve_clawhub_url_latest(self):
+        from defenseclaw.commands.cmd_skill import _resolve_clawhub_url
+
+        self.assertEqual(
+            _resolve_clawhub_url("clawhub://my-skill"),
+            "https://clawhub.ai/api/skills/my-skill/latest/download",
+        )
+
+    @patch("requests.get")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_from_url_tar(self, mock_scanner_cls, mock_requests_get):
+        import tarfile
+
+        # Create a tar.gz with a skill inside
+        skill_tmpdir = tempfile.mkdtemp()
+        skill_dir = os.path.join(skill_tmpdir, "test-skill")
+        os.makedirs(skill_dir)
+        with open(os.path.join(skill_dir, "skill.yaml"), "w") as f:
+            f.write("name: test-skill\n")
+
+        tar_path = os.path.join(skill_tmpdir, "skill.tar.gz")
+        with tarfile.open(tar_path, "w:gz") as tf:
+            tf.add(skill_dir, arcname="test-skill")
+
+        with open(tar_path, "rb") as f:
+            tar_bytes = f.read()
+
+        shutil.rmtree(skill_tmpdir)
+
+        # Mock HTTP response
+        mock_resp = MagicMock()
+        mock_resp.headers = {"content-type": "application/gzip"}
+        mock_resp.iter_content.return_value = [tar_bytes]
+        mock_resp.raise_for_status.return_value = None
+        mock_requests_get.return_value = mock_resp
+
+        # Mock scanner
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/test-skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+            duration=timedelta(seconds=0.1),
+        )
+        mock_scanner_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "https://example.com/skill.tar.gz"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("CLEAN", result.output)
+        mock_scanner.scan.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

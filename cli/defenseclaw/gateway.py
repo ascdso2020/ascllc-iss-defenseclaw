@@ -63,6 +63,20 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def scan_skill(self, target: str, name: str = "") -> dict[str, Any]:
+        """Request a skill scan on the remote sidecar host.
+
+        The sidecar runs the skill-scanner locally against the target path
+        on that machine and returns the ScanResult JSON.
+        """
+        resp = requests.post(
+            f"{self.base_url}/v1/skill/scan",
+            json={"target": target, "name": name},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def is_running(self) -> bool:
         try:
             self.health()
