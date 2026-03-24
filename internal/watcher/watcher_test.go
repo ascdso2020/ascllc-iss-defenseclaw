@@ -64,7 +64,7 @@ func setupTestEnv(t *testing.T) (cfg *config.Config, store *audit.Store, logger 
 func TestClassifyEvent_SkillDir(t *testing.T) {
 	cfg, store, logger, skillDir, mcpDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	evt := w.classifyEvent(filepath.Join(skillDir, "my-skill"))
 	if evt.Type != InstallSkill {
@@ -78,7 +78,7 @@ func TestClassifyEvent_SkillDir(t *testing.T) {
 func TestClassifyEvent_MCPDir(t *testing.T) {
 	cfg, store, logger, skillDir, mcpDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	evt := w.classifyEvent(filepath.Join(mcpDir, "my-server.json"))
 	if evt.Type != InstallMCP {
@@ -97,7 +97,7 @@ func TestAdmission_BlockedSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "evil-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -120,7 +120,7 @@ func TestAdmission_AllowedSkill(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "trusted-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -143,7 +143,7 @@ func TestAdmission_BlockedMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	mcpPath := filepath.Join(mcpDir, "rogue-server")
 	if err := os.WriteFile(mcpPath, []byte(`{}`), 0o600); err != nil {
@@ -166,7 +166,7 @@ func TestAdmission_AllowedMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	mcpPath := filepath.Join(mcpDir, "approved-server")
 	if err := os.WriteFile(mcpPath, []byte(`{}`), 0o600); err != nil {
@@ -184,7 +184,7 @@ func TestAdmission_AllowedMCP(t *testing.T) {
 func TestAdmission_ScanError_NoScanner(t *testing.T) {
 	cfg, store, logger, skillDir, mcpDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "unknown-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {
@@ -210,7 +210,7 @@ func TestWatcher_DetectsNewFile(t *testing.T) {
 	var mu sync.Mutex
 	var results []AdmissionResult
 
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, func(r AdmissionResult) {
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, func(r AdmissionResult) {
 		mu.Lock()
 		results = append(results, r)
 		mu.Unlock()
@@ -268,7 +268,7 @@ func TestWatcher_DetectsNewDirectory(t *testing.T) {
 	var mu sync.Mutex
 	var results []AdmissionResult
 
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, func(r AdmissionResult) {
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, func(r AdmissionResult) {
 		mu.Lock()
 		results = append(results, r)
 		mu.Unlock()
@@ -324,7 +324,7 @@ func TestAdmission_GatePrecedence_BlockBeatsAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil)
+	w := New(cfg, []string{skillDir}, []string{mcpDir}, store, logger, shell, nil, nil)
 
 	skillPath := filepath.Join(skillDir, "conflict-skill")
 	if err := os.MkdirAll(skillPath, 0o700); err != nil {

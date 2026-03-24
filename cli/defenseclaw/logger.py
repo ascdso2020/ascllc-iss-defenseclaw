@@ -6,9 +6,8 @@ Mirrors internal/audit/logger.go.
 from __future__ import annotations
 
 import json
-import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from defenseclaw.db import Store
 from defenseclaw.models import Event, ScanResult
@@ -37,7 +36,7 @@ class Logger:
             )
 
         event = Event(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             action="scan",
             target=result.target,
             details=(
@@ -50,7 +49,7 @@ class Logger:
 
     def log_action(self, action: str, target: str, details: str) -> None:
         event = Event(
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
             action=action,
             target=target,
             details=details,

@@ -1,36 +1,97 @@
 # CLI Reference
 
-All subcommands are registered on `defenseclaw`. Use `defenseclaw help <command>` for flags and examples.
+All subcommands are registered on `defenseclaw`. Use `defenseclaw <command> --help` for flags and examples.
 
 ## Commands
 
-| Command | Description | Iteration |
-|--------|-------------|-----------|
-| `init` | Create `~/.defenseclaw` config and SQLite audit database | 1 |
-| `scan skill <path>` | Run skill-scanner on a skill directory | 1 |
-| `scan mcp <path-or-url>` | Run mcp-scanner on MCP manifest or endpoint | 1 |
-| `scan aibom <path>` | Run aibom inventory on a project path | 1 |
-| `scan code <path>` | Run CodeGuard security rules on code files | 4 |
-| `scan [path]` | Run all scanners against a target (scans all claw skill dirs when no path given) | 1 |
-| `skill install <name>` | Scan → enforce block/allow list → install if clean | 2 |
-| `skill scan <path>` | Run all scanners against a skill and report verdict | 2 |
-| `skill disable <key>` | Disable a skill via gateway RPC and add to block list | 4 |
-| `skill enable <key>` | Re-enable a previously disabled skill | 4 |
-| `deploy [path]` | Full orchestrated deploy: init → scan → block → policy → sandbox | 4 |
-| `block skill <id>` | Add a skill to the block list | 2 |
-| `block mcp <id>` | Add an MCP server to the block list | 2 |
-| `allow skill <id>` | Add a skill to the allow list | 2 |
-| `allow mcp <id>` | Add an MCP server to the allow list | 2 |
-| `list blocked` | List blocked skills and MCP servers | 2 |
-| `list allowed` | List allowed skills and MCP servers | 2 |
-| `quarantine <skill>` | Immediately block + quarantine a skill | 2 |
-| `rescan` | Re-scan all known targets, auto-block/unblock by results | 4 |
-| `alerts` | Show recent security alerts | 4 |
-| `status` | Show environment, sandbox health, and counts | 4 |
-| `stop` | Stop the OpenShell sandbox | 4 |
-| `tui` | Launch the interactive terminal dashboard | 3 |
-| `audit` | View audit log events | 1 |
-| `audit export` | Export audit events (JSON, CSV, Splunk HEC) | 5 |
+| Command | Description |
+|---------|-------------|
+| `init` | Create `~/.defenseclaw` config, SQLite audit database, and install scanner dependencies |
+| `setup skill-scanner` | Interactively configure skill-scanner analyzers, API keys, and policy |
+| `deploy [path]` | Full orchestrated deploy: init → scan → block → policy → sandbox |
+| `sidecar` | Show gateway sidecar info and startup instructions |
+| `sidecar status` | Show health of the running sidecar's subsystems |
+| `status` | Show environment, sandbox health, scanner availability, and enforcement counts |
+| `alerts` | Show recent security alerts |
+
+### skill
+
+| Command | Description |
+|---------|-------------|
+| `skill list` | List all OpenClaw skills with scan severity and enforcement status |
+| `skill scan <target>` | Scan a skill by name, path, or `all` for all configured skills |
+| `skill install <name>` | Install via clawhub → scan → enforce block/allow list |
+| `skill info <name>` | Show detailed skill metadata, scan results, and enforcement actions |
+| `skill block <name>` | Add a skill to the block list |
+| `skill allow <name>` | Add a skill to the allow list (removes from block list) |
+| `skill disable <name>` | Disable a skill at runtime via gateway RPC |
+| `skill enable <name>` | Re-enable a previously disabled skill via gateway RPC |
+| `skill quarantine <name>` | Move a skill's files to the quarantine area |
+| `skill restore <name>` | Restore a quarantined skill to its original location |
+
+### mcp
+
+| Command | Description |
+|---------|-------------|
+| `mcp list` | List MCP servers with enforcement status |
+| `mcp scan <url>` | Scan an MCP server endpoint |
+| `mcp block <url>` | Add an MCP server to the block list |
+| `mcp allow <url>` | Add an MCP server to the allow list |
+
+### plugin
+
+| Command | Description |
+|---------|-------------|
+| `plugin list` | List installed plugins |
+| `plugin scan <name-or-path>` | Scan a plugin for security issues |
+| `plugin install <name-or-path>` | Install a plugin from a local path or registry |
+| `plugin remove <name>` | Remove an installed plugin |
+
+### aibom
+
+| Command | Description |
+|---------|-------------|
+| `aibom generate [path]` | Generate AI Bill of Materials for a project |
+
+---
+
+## init
+
+```
+defenseclaw init [flags]
+```
+
+Creates `~/.defenseclaw/`, default config, SQLite audit database,
+and installs scanner dependencies (skill-scanner, mcp-scanner, cisco-aibom) via `uv`.
+
+**Flags:**
+- `--skip-install` — skip automatic scanner dependency installation
+
+## setup skill-scanner
+
+```
+defenseclaw setup skill-scanner [flags]
+```
+
+Interactively configure how skill-scanner runs. Enables LLM analysis,
+behavioral dataflow analysis, meta-analyzer filtering, VirusTotal, and Cisco AI Defense.
+
+API keys are stored in `~/.defenseclaw/config.yaml` and injected as
+environment variables when skill-scanner runs.
+
+**Flags:**
+- `--use-llm` — enable LLM analyzer
+- `--use-behavioral` — enable behavioral analyzer
+- `--enable-meta` — enable meta-analyzer (false positive filtering)
+- `--use-trigger` — enable trigger analyzer
+- `--use-virustotal` — enable VirusTotal binary scanner
+- `--use-aidefense` — enable Cisco AI Defense analyzer
+- `--llm-provider` — LLM provider (`anthropic` or `openai`)
+- `--llm-model` — LLM model name
+- `--llm-consensus-runs` — LLM consensus runs (0 = disabled)
+- `--policy` — scan policy preset (`strict`, `balanced`, `permissive`)
+- `--lenient` — tolerate malformed skills
+- `--non-interactive` — use flags instead of prompts (for CI)
 
 ## deploy
 
@@ -40,29 +101,278 @@ defenseclaw deploy [path] [flags]
 
 Full orchestrated deployment:
 1. Initialize if needed
-2. Run all scanners (skills + MCP + AIBOM + CodeGuard)
+2. Run all scanners (skills + MCP + AIBOM)
 3. Auto-block anything HIGH/CRITICAL
 4. Generate OpenShell sandbox policy
-5. Start OpenClaw in sandbox
+5. Start sandbox
 6. Print summary
 
 **Flags:**
 - `--skip-init` — skip initialization step
 
-## scan code
+## skill list
 
 ```
-defenseclaw scan code <path>
+defenseclaw skill list [flags]
 ```
 
-Scans code files using built-in CodeGuard security rules. Detects:
-- Hardcoded credentials (API keys, AWS keys, private keys)
-- Unsafe command execution (`eval`, `exec`, `system`, `subprocess`)
-- SQL injection (string formatting in queries)
-- Unsafe deserialization (`pickle`, `yaml.load`)
-- Weak cryptography (MD5, SHA1)
-- Path traversal
-- Outbound HTTP to variable URLs
+Lists all OpenClaw skills with their latest scan severity, enforcement status,
+and applied actions. Merges data from OpenClaw's skill registry with DefenseClaw's
+audit database.
+
+**Flags:**
+- `--json` — output merged skill list as JSON
+
+## skill scan
+
+```
+defenseclaw skill scan <target> [flags]
+```
+
+Scans a skill by name, path, or `all` for all configured skills. Respects
+block/allow lists — blocked skills are rejected, allowed skills skip scan.
+
+**Flags:**
+- `--json` — output scan results as JSON
+- `--path` — override skill directory path
+
+**Examples:**
+
+```bash
+# Scan a skill by name (resolved via openclaw)
+defenseclaw skill scan web-search
+
+# Scan a skill by path
+defenseclaw skill scan ./my-skill --path ./my-skill
+
+# Scan all configured skills
+defenseclaw skill scan all
+```
+
+## skill install
+
+```
+defenseclaw skill install <name> [flags]
+```
+
+Installs a skill via clawhub, then scans and optionally enforces policy.
+Follows the admission gate: block list → allow list → scan → enforce.
+
+**Flags:**
+- `--force` — overwrite an existing skill
+- `--action` — apply configured `skill_actions` policy based on scan severity (quarantine, disable, block)
+
+## skill info
+
+```
+defenseclaw skill info <name> [flags]
+```
+
+Shows merged skill metadata from OpenClaw, latest scan results, and enforcement actions.
+
+**Flags:**
+- `--json` — output as JSON
+
+## skill block
+
+```
+defenseclaw skill block <name> [flags]
+```
+
+Adds a skill to the install block list. Blocked skills are rejected by
+`skill install` before any scan runs.
+
+**Flags:**
+- `--reason` — reason for blocking
+
+## skill allow
+
+```
+defenseclaw skill allow <name> [flags]
+```
+
+Adds a skill to the allow list. Allow-listed skills skip the scan gate
+during install. Also removes the skill from the block list.
+
+**Flags:**
+- `--reason` — reason for allowing
+
+## skill disable
+
+```
+defenseclaw skill disable <name> [flags]
+```
+
+Disables a skill at runtime via OpenClaw gateway RPC. Prevents the agent
+from using the skill's tools until re-enabled. Requires the sidecar to be running.
+
+**Flags:**
+- `--reason` — reason for disabling
+
+## skill enable
+
+```
+defenseclaw skill enable <name>
+```
+
+Re-enables a previously disabled skill via gateway RPC.
+
+## skill quarantine
+
+```
+defenseclaw skill quarantine <name> [flags]
+```
+
+Moves the skill's directory to `~/.defenseclaw/quarantine/skills/` and records
+the action. Use `skill restore` to undo.
+
+**Flags:**
+- `--reason` — reason for quarantine
+
+## skill restore
+
+```
+defenseclaw skill restore <name> [flags]
+```
+
+Restores a quarantined skill to its original location.
+
+**Flags:**
+- `--path` — override restore destination (defaults to original path)
+
+## mcp list
+
+```
+defenseclaw mcp list
+```
+
+Lists MCP servers with their enforcement status (blocked, allowed), reason,
+and last update time.
+
+## mcp scan
+
+```
+defenseclaw mcp scan <url> [flags]
+```
+
+Scans an MCP server endpoint using cisco-ai-mcp-scanner.
+
+**Flags:**
+- `--json` — output results as JSON
+
+## mcp block
+
+```
+defenseclaw mcp block <url> [flags]
+```
+
+Adds an MCP server to the block list.
+
+**Flags:**
+- `--reason` — reason for blocking
+
+## mcp allow
+
+```
+defenseclaw mcp allow <url> [flags]
+```
+
+Adds an MCP server to the allow list.
+
+**Flags:**
+- `--reason` — reason for allowing
+
+## plugin list
+
+```
+defenseclaw plugin list
+```
+
+Lists installed plugins from `~/.defenseclaw/plugins/`.
+
+## plugin scan
+
+```
+defenseclaw plugin scan <name-or-path> [flags]
+```
+
+Scans a plugin directory for security issues. Checks for dangerous permissions,
+install scripts, credential theft, obfuscation, supply chain risks, and more.
+
+Accepts a plugin name (resolved from `~/.defenseclaw/plugins/`) or a direct path.
+
+**Flags:**
+- `--json` — output scan results as JSON
+
+**Examples:**
+
+```bash
+# Scan an installed plugin by name
+defenseclaw plugin scan my-plugin
+
+# Scan a plugin directory
+defenseclaw plugin scan /path/to/plugin
+```
+
+## plugin install
+
+```
+defenseclaw plugin install <name-or-path>
+```
+
+Installs a plugin from a local directory path. Copies the plugin directory
+to `~/.defenseclaw/plugins/`.
+
+## plugin remove
+
+```
+defenseclaw plugin remove <name>
+```
+
+Removes an installed plugin by name.
+
+## aibom generate
+
+```
+defenseclaw aibom generate [path] [flags]
+```
+
+Generates an AI Bill of Materials for a project. Runs cisco-aibom to inventory
+AI components, models, and dependencies.
+
+**Flags:**
+- `--json` — output results as JSON
+
+**Examples:**
+
+```bash
+# Generate AIBOM for current directory
+defenseclaw aibom generate
+
+# Generate AIBOM for a specific project
+defenseclaw aibom generate /path/to/project
+
+# Output as JSON for pipeline integration
+defenseclaw aibom generate --json
+```
+
+## sidecar
+
+```
+defenseclaw sidecar
+```
+
+Displays gateway sidecar configuration and startup instructions.
+The sidecar daemon runs as a separate Go binary (`defenseclaw-go`).
+
+## sidecar status
+
+```
+defenseclaw sidecar status
+```
+
+Queries the sidecar's REST API to display the health of all three subsystems:
+gateway connection, skill watcher, and API server.
 
 ## status
 
@@ -71,25 +381,7 @@ defenseclaw status
 ```
 
 Shows environment, data directory, sandbox state, scanner availability,
-enforcement counts, and activity summary.
-
-## rescan
-
-```
-defenseclaw rescan
-```
-
-Re-scans all items on block and allow lists. Targets with HIGH/CRITICAL
-findings are auto-blocked. Previously blocked items that are now clean
-are moved to the allow list.
-
-## stop
-
-```
-defenseclaw stop
-```
-
-Gracefully stops the OpenShell sandbox process started by `defenseclaw deploy`.
+enforcement counts, activity summary, and sidecar status.
 
 ## alerts
 
@@ -101,69 +393,3 @@ Displays recent security alerts (events with severity CRITICAL, HIGH, MEDIUM, or
 
 **Flags:**
 - `-n, --limit` — number of alerts to show (default: 25)
-
-## audit
-
-```
-defenseclaw audit [-n limit]
-```
-
-Displays recent audit events from the SQLite event store.
-
-**Flags:**
-- `-n, --limit` — number of events to show (default: 25)
-
-## audit export
-
-```
-defenseclaw audit export [flags]
-```
-
-Exports audit events in multiple formats for SIEM/SOAR integration.
-
-**Formats:**
-- `json` — JSON array (default)
-- `csv` — CSV with headers
-- `splunk` — Send directly to Splunk via HTTP Event Collector (HEC)
-
-**Flags:**
-- `-f, --format` — export format: `json`, `csv`, `splunk` (default: `json`)
-- `-n, --limit` — number of events to export (default: 100)
-- `-o, --output` — output file path, or `-` for stdout (default: `-`, ignored for splunk)
-
-**Examples:**
-
-```bash
-# Export last 100 events as JSON to stdout
-defenseclaw audit export
-
-# Export to a file
-defenseclaw audit export -o audit-events.json
-
-# Export as CSV
-defenseclaw audit export -f csv -o events.csv
-
-# Send events to Splunk (requires splunk config in config.yaml or env var)
-DEFENSECLAW_SPLUNK_HEC_TOKEN=<token> defenseclaw audit export -f splunk -n 500
-```
-
-### Splunk Configuration
-
-Add to `~/.defenseclaw/config.yaml`:
-
-```yaml
-splunk:
-  hec_endpoint: https://your-splunk:8088/services/collector/event
-  hec_token: ""           # or set DEFENSECLAW_SPLUNK_HEC_TOKEN env var
-  index: defenseclaw
-  source: defenseclaw
-  sourcetype: _json
-  verify_tls: false       # set true for production
-  enabled: false          # set true for real-time forwarding
-  batch_size: 50
-  flush_interval_s: 5
-```
-
-When `splunk.enabled: true`, every audit event (scans, blocks, allows, deploys) is
-forwarded to Splunk in real-time via HEC as it happens. The `audit export -f splunk`
-command is for bulk/batch export of historical events.

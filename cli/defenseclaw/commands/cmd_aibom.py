@@ -1,6 +1,6 @@
 """defenseclaw aibom — Generate and manage AI Bill of Materials.
 
-Stub implementation that shells out to cisco-aibom CLI.
+Shells out to cisco-aibom CLI.
 """
 
 from __future__ import annotations
@@ -10,11 +10,16 @@ import click
 from defenseclaw.context import AppContext, pass_ctx
 
 
-@click.command()
+@click.group()
+def aibom() -> None:
+    """Manage AI Bill of Materials — generate, inspect."""
+
+
+@aibom.command()
 @click.argument("path", default=".")
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
 @pass_ctx
-def aibom(app: AppContext, path: str, as_json: bool) -> None:
+def generate(app: AppContext, path: str, as_json: bool) -> None:
     """Generate AI Bill of Materials for a project.
 
     Runs cisco-aibom to inventory AI components, models, and dependencies.

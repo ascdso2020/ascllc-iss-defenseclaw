@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 SEVERITY_RANK = {
@@ -128,13 +128,13 @@ class ActionEntry:
     source_path: str = ""
     actions: ActionState = field(default_factory=ActionState)
     reason: str = ""
-    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass
 class Event:
     id: str = ""
-    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     action: str = ""
     target: str = ""
     actor: str = "defenseclaw"
