@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 
 import click
@@ -290,9 +289,6 @@ def activate(app: AppContext, name: str) -> None:
 
     # Update skill_actions in config
     actions_raw = data.get("skill_actions", {})
-    admission = data.get("admission", {})
-    enforcement = data.get("enforcement", {})
-    audit_cfg = data.get("audit", {})
 
     from defenseclaw.config import (
         SeverityAction,
@@ -315,12 +311,6 @@ def activate(app: AppContext, name: str) -> None:
     )
 
     app.cfg.skill_actions = new_actions
-
-    if "scan_on_install" in admission:
-        pass  # scan_on_install is a watch-level config, not stored in skill_actions
-    if "allow_list_bypass_scan" in admission:
-        pass  # same — watch-level
-
     app.cfg.save()
     click.echo(f"Config updated with policy '{name}'.")
 
