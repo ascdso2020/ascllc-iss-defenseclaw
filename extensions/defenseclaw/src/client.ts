@@ -8,7 +8,8 @@ import type {
   AdmissionResult,
 } from "./types.js";
 
-const DEFAULT_BASE_URL = "http://127.0.0.1:18790";
+const DEFAULT_BASE_URL =
+  process.env["DEFENSECLAW_DAEMON_URL"] || "http://127.0.0.1:18790";
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 type RequestImpl = typeof httpRequest;

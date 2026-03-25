@@ -112,17 +112,17 @@ export default definePluginEntry(({ api, registerService, registerCommand }) => 
 
   // ─── Lifecycle: skill install/uninstall ───
 
-  api.on("skill_install", async (event: { name: string; path: string }) => {
+  api.guard("skill_install", async (event: { name: string; path: string }) => {
     console.log(`[defenseclaw] skill install detected: ${event.name}`);
 
     const result = await enforcer.evaluateSkill(event.path, event.name);
     console.log(`[defenseclaw] ${formatAdmissionResult(result)}`);
 
     if (result.verdict === "rejected" || result.verdict === "blocked" || result.verdict === "scan-error") {
-      console.log(
-        `[defenseclaw] BLOCKED skill "${event.name}": ${result.reason}`,
-      );
+      return { allow: false, reason: result.reason };
     }
+
+    return { allow: true };
   });
 
   api.on("skill_uninstall", async (event: { name: string; path: string }) => {
@@ -140,7 +140,7 @@ export default definePluginEntry(({ api, registerService, registerCommand }) => 
 
   // ─── Lifecycle: MCP connect/disconnect ───
 
-  api.on("mcp_connect", async (event: { name: string; config_path?: string }) => {
+  api.guard("mcp_connect", async (event: { name: string; config_path?: string }) => {
     console.log(`[defenseclaw] MCP server connecting: ${event.name}`);
 
     if (event.config_path) {
@@ -149,11 +149,17 @@ export default definePluginEntry(({ api, registerService, registerCommand }) => 
         event.name,
       );
       console.log(`[defenseclaw] ${formatAdmissionResult(result)}`);
+
+      if (result.verdict === "rejected" || result.verdict === "blocked" || result.verdict === "scan-error") {
+        return { allow: false, reason: result.reason };
+      }
     } else {
       console.log(
         `[defenseclaw] MCP "${event.name}" connected (no config path — skipping scan)`,
       );
     }
+
+    return { allow: true };
   });
 
   api.on("mcp_disconnect", async (event: { name: string }) => {
