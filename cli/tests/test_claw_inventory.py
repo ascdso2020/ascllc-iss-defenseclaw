@@ -660,6 +660,24 @@ class TestRunOpenclawUnit(unittest.TestCase):
         result = _run_openclaw("models", "status")
         self.assertIn("openclaw models status --json", result.command)
 
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_stderr_json_with_trailing_warnings(self, mock_sub):
+        """JSON on stderr followed by Node.js warnings should still parse."""
+        json_part = '{"skills": [{"name": "test-skill"}]}'
+        warning = (
+            "\n(node:12345) [MODULE_TYPELESS_PACKAGE_JSON] Warning: "
+            "Module type not specified"
+        )
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr=json_part + warning,
+        )
+        result = _run_openclaw("skills", "list")
+        self.assertIsNotNone(result.data)
+        self.assertEqual(result.data["skills"][0]["name"], "test-skill")
+        self.assertIsNone(result.error)
+
 
 class TestParserUnits(unittest.TestCase):
     """Unit tests for individual _parse_* functions."""

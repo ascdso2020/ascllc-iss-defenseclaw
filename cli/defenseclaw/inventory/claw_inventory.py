@@ -527,6 +527,7 @@ def _run_openclaw(*args: str) -> _CmdResult:
             msg += f": {stderr_snippet}"
         return _CmdResult(data=None, error=msg, command=cmd_str)
 
+    decoder = json.JSONDecoder()
     for stream in (proc.stdout, proc.stderr):
         text = stream.strip()
         if not text:
@@ -534,6 +535,13 @@ def _run_openclaw(*args: str) -> _CmdResult:
         try:
             return _CmdResult(data=json.loads(text), error=None, command=cmd_str)
         except json.JSONDecodeError:
+            pass
+        # stderr may contain valid JSON followed by Node.js warnings;
+        # raw_decode stops at the end of the first JSON value.
+        try:
+            obj, _ = decoder.raw_decode(text)
+            return _CmdResult(data=obj, error=None, command=cmd_str)
+        except (json.JSONDecodeError, ValueError):
             continue
 
     return _CmdResult(data=None, error="no JSON in output", command=cmd_str)
