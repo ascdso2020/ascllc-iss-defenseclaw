@@ -276,6 +276,12 @@ class TestSetupCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Configure skill-scanner", result.output)
 
+    def test_setup_splunk_local_help(self):
+        from defenseclaw.commands.cmd_setup import setup
+        result = self.runner.invoke(setup, ["splunk-local", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Configure DefenseClaw to use the splunk-claw-bridge local Splunk preset", result.output)
+
     def test_setup_non_interactive_flags(self):
         from defenseclaw.commands.cmd_setup import setup
 
@@ -300,6 +306,76 @@ class TestSetupCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(self.app.cfg.scanners.skill_scanner.use_behavioral)
+
+    def test_setup_splunk_local_non_interactive_defaults(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk-local", "--non-interactive"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.splunk.enabled)
+        self.assertEqual(
+            self.app.cfg.splunk.hec_endpoint,
+            "http://127.0.0.1:8088/services/collector/event",
+        )
+        self.assertEqual(self.app.cfg.splunk.index, "defenseclaw_local")
+        self.assertEqual(self.app.cfg.splunk.source, "defenseclaw")
+        self.assertEqual(self.app.cfg.splunk.sourcetype, "defenseclaw:json")
+        self.assertFalse(self.app.cfg.splunk.verify_tls)
+        self.assertIn("DEFENSECLAW_SPLUNK_HEC_TOKEN", result.output)
+        self.assertIn("https://github.com/splunk/splunk-claw-bridge", result.output)
+
+    def test_setup_splunk_local_non_interactive_override(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk-local",
+                "--non-interactive",
+                "--hec-endpoint",
+                "http://127.0.0.1:18088/services/collector/event",
+                "--index",
+                "custom_index",
+                "--source",
+                "custom_source",
+                "--sourcetype",
+                "custom:json",
+                "--verify-tls",
+                "--batch-size",
+                "9",
+                "--flush-interval-s",
+                "11",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.splunk.hec_endpoint, "http://127.0.0.1:18088/services/collector/event")
+        self.assertEqual(self.app.cfg.splunk.index, "custom_index")
+        self.assertEqual(self.app.cfg.splunk.source, "custom_source")
+        self.assertEqual(self.app.cfg.splunk.sourcetype, "custom:json")
+        self.assertTrue(self.app.cfg.splunk.verify_tls)
+        self.assertEqual(self.app.cfg.splunk.batch_size, 9)
+        self.assertEqual(self.app.cfg.splunk.flush_interval_s, 11)
+
+    def test_setup_splunk_local_disable(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.splunk.enabled = True
+        result = self.runner.invoke(
+            setup,
+            ["splunk-local", "--disable"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.splunk.enabled)
+        self.assertIn("Local Splunk bridge forwarding disabled", result.output)
 
 
 class TestSetupHelpers(unittest.TestCase):

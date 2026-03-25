@@ -225,6 +225,32 @@ export DEFENSECLAW_SPLUNK_HEC_TOKEN="your-hec-token"
 With `enabled: true`, every scan, block, allow, deploy, and quarantine event is
 streamed to Splunk as it happens.
 
+### Local splunk-claw-bridge preset
+
+For the local bridge workflow, prefer the preset instead of editing the generic
+Splunk config manually:
+
+```bash
+defenseclaw setup splunk-local --non-interactive
+export DEFENSECLAW_SPLUNK_HEC_TOKEN="your-bridge-hec-token"
+```
+
+That preset aligns DefenseClaw with the public bridge contract from
+`https://github.com/splunk/splunk-claw-bridge`:
+
+- HEC endpoint `http://127.0.0.1:8088/services/collector/event`
+- index `defenseclaw_local`
+- source `defenseclaw`
+- sourcetype `defenseclaw:json`
+
+Recommended local flow:
+
+1. Start `splunk-claw-bridge`
+2. Run `defenseclaw setup splunk-local --non-interactive`
+3. Export `DEFENSECLAW_SPLUNK_HEC_TOKEN`
+4. Start the DefenseClaw sidecar
+5. Validate data in local Splunk
+
 ## 11. Running Tests
 
 ```bash
