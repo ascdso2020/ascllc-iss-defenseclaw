@@ -8,7 +8,7 @@ INSTALL_DIR := $(HOME)/.local/bin
 PLUGIN_DIR  := extensions/defenseclaw
 DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
 
-.PHONY: build install dev-install pycli gateway gateway-cross gateway-run gateway-install \
+.PHONY: build install dev-install pycli dev-pycli gateway gateway-cross gateway-run gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean
 
@@ -49,6 +49,9 @@ pycli:
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv venv $(VENV) --python 3.12
 	uv pip install -e . --python $(VENV)/bin/python
+
+dev-pycli: pycli
+	uv pip install --group dev --python $(VENV)/bin/python
 	@echo ""
 	@echo "Done. Activate the environment and run:"
 	@echo "  source $(VENV)/bin/activate"

@@ -1,4 +1,4 @@
-"""Tests for defenseclaw.scanner — AIBOM, MCP, and skill scanner wrappers."""
+"""Tests for defenseclaw.scanner — MCP and skill scanner wrappers."""
 
 import json
 import os
@@ -9,55 +9,6 @@ from unittest.mock import MagicMock, patch
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-
-class TestAIBOMScannerWrapper(unittest.TestCase):
-    def test_name(self):
-        from defenseclaw.scanner.aibom import AIBOMScannerWrapper
-        s = AIBOMScannerWrapper()
-        self.assertEqual(s.name(), "aibom")
-
-    @patch("defenseclaw.scanner.aibom.subprocess.run")
-    def test_scan_success_with_json_output(self, mock_run):
-        from defenseclaw.scanner.aibom import AIBOMScannerWrapper
-
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        s = AIBOMScannerWrapper("cisco-aibom")
-
-        with patch("defenseclaw.scanner.aibom.Path.read_text") as mock_read:
-            mock_read.return_value = json.dumps({"components": ["model-a"]})
-            with patch("defenseclaw.scanner.aibom.Path.unlink"):
-                result = s.scan("/tmp/project")
-
-        self.assertEqual(result.scanner, "aibom")
-        self.assertEqual(result.target, "/tmp/project")
-        self.assertEqual(len(result.findings), 1)
-        self.assertEqual(result.findings[0].id, "aibom-inventory")
-
-    @patch("defenseclaw.scanner.aibom.subprocess.run", side_effect=FileNotFoundError)
-    def test_scan_binary_not_found(self, _mock):
-        from defenseclaw.scanner.aibom import AIBOMScannerWrapper
-
-        s = AIBOMScannerWrapper("nonexistent-binary")
-        with self.assertRaises(SystemExit) as ctx:
-            s.scan("/tmp/project")
-        self.assertEqual(ctx.exception.code, 1)
-
-    @patch("defenseclaw.scanner.aibom.subprocess.run")
-    def test_scan_invalid_json_output(self, mock_run):
-        from defenseclaw.scanner.aibom import AIBOMScannerWrapper
-
-        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-
-        s = AIBOMScannerWrapper()
-
-        with patch("defenseclaw.scanner.aibom.Path.read_text") as mock_read:
-            mock_read.return_value = "not-json"
-            with patch("defenseclaw.scanner.aibom.Path.unlink"):
-                result = s.scan("/tmp/project")
-
-        self.assertEqual(len(result.findings), 0)
 
 
 class TestMCPScannerWrapper(unittest.TestCase):

@@ -1,11 +1,16 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // ToolInspectRequest is the payload for POST /api/v1/inspect/tool.
@@ -37,12 +42,30 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 
 	ruleFindings := ScanAllRules(argsStr, toolName)
 
-	if len(ruleFindings) == 0 {
+	// CodeGuard: scan file content for write_file/edit_file tools.
+	tool := strings.ToLower(toolName)
+	isWriteTool := tool == "write_file" || tool == "edit_file"
+	var cgFindings []scanner.Finding
+	if isWriteTool {
+		cgFindings = a.runCodeGuardOnArgs(req)
+	}
+
+	if len(ruleFindings) == 0 && len(cgFindings) == 0 {
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
+
+	for _, cf := range cgFindings {
+		if cf.Severity == scanner.SeverityCritical {
+			severity = "CRITICAL"
+			break
+		}
+		if cf.Severity == scanner.SeverityHigh && severity != "CRITICAL" {
+			severity = "HIGH"
+		}
+	}
 
 	action := "alert"
 	if severity == "HIGH" || severity == "CRITICAL" {
@@ -57,14 +80,48 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 		reasons = append(reasons, f.RuleID+":"+f.Title)
 	}
 
+	findingStrs := FindingStrings(ruleFindings)
+	for _, cf := range cgFindings {
+		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
+	}
+
 	return &ToolInspectVerdict{
 		Action:           action,
 		Severity:         severity,
 		Confidence:       confidence,
 		Reason:           fmt.Sprintf("matched: %s", strings.Join(reasons, ", ")),
-		Findings:         FindingStrings(ruleFindings),
+		Findings:         findingStrs,
 		DetailedFindings: ruleFindings,
 	}
+}
+
+// runCodeGuardOnArgs extracts path/content from write_file/edit_file args
+// and runs CodeGuard content scanning.
+func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(req.Args, &parsed); err != nil {
+		return nil
+	}
+
+	filePath, _ := parsed["path"].(string)
+	content, _ := parsed["content"].(string)
+	if content == "" {
+		content, _ = parsed["new_string"].(string)
+	}
+	if filePath == "" || content == "" {
+		return nil
+	}
+
+	if !scanner.IsCodeFile(filepath.Ext(filePath)) {
+		return nil
+	}
+
+	rulesDir := ""
+	if a.scannerCfg != nil {
+		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	}
+	cg := scanner.NewCodeGuardScanner(rulesDir)
+	return cg.ScanContent(filePath, content)
 }
 
 // inspectMessageContent scans outbound message content for secrets, PII,
@@ -171,5 +228,55 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s",
 			verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, mode))
 
+	// OTel: emit CodeGuard alerts and guardrail metrics for write_file/edit_file.
+	a.emitCodeGuardOTel(&req, verdict, elapsed)
+
 	a.writeJSON(w, http.StatusOK, verdict)
+}
+
+// emitCodeGuardOTel sends OTel signals when CodeGuard findings are present.
+func (a *APIServer) emitCodeGuardOTel(req *ToolInspectRequest, verdict *ToolInspectVerdict, elapsed time.Duration) {
+	if a.otel == nil {
+		return
+	}
+
+	tool := strings.ToLower(req.Tool)
+	if tool != "write_file" && tool != "edit_file" {
+		return
+	}
+
+	elapsedMs := float64(elapsed.Milliseconds())
+
+	a.otel.RecordGuardrailEvaluation(context.Background(), "codeguard", verdict.Action)
+	a.otel.RecordGuardrailLatency(context.Background(), "codeguard", elapsedMs)
+
+	hasCodeGuardFinding := false
+	for _, f := range verdict.Findings {
+		if strings.HasPrefix(f, "codeguard:") {
+			hasCodeGuardFinding = true
+			break
+		}
+	}
+
+	if !hasCodeGuardFinding {
+		return
+	}
+
+	if verdict.Action == "block" || verdict.Action == "alert" {
+		var filePath string
+		var parsed map[string]interface{}
+		if err := json.Unmarshal(req.Args, &parsed); err == nil {
+			filePath, _ = parsed["path"].(string)
+		}
+
+		a.otel.EmitRuntimeAlert(
+			telemetry.AlertCodeGuardFinding,
+			verdict.Severity,
+			telemetry.SourceCodeGuard,
+			fmt.Sprintf("CodeGuard: %s", verdict.Reason),
+			map[string]string{"tool": req.Tool, "command": filePath},
+			map[string]string{"scanner": "codeguard", "action_taken": verdict.Action},
+			"", "",
+		)
+	}
 }

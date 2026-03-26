@@ -120,7 +120,6 @@ class MCPScannerConfig:
 class ScannersConfig:
     skill_scanner: SkillScannerConfig = field(default_factory=SkillScannerConfig)
     mcp_scanner: MCPScannerConfig = field(default_factory=MCPScannerConfig)
-    aibom: str = "cisco-aibom"
     codeguard: str = ""
 
 
@@ -589,7 +588,6 @@ def load() -> Config:
                 aidefense_api_key=ss_raw.get("aidefense_api_key", ""),
             ),
             mcp_scanner=_merge_mcp_scanner(scanners_raw.get("mcp_scanner")),
-            aibom=scanners_raw.get("aibom", "cisco-aibom"),
             codeguard=scanners_raw.get("codeguard", os.path.join(data_dir, "codeguard-rules")),
         ),
         openshell=OpenShellConfig(

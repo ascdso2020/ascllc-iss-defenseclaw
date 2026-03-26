@@ -81,7 +81,6 @@ func DefaultConfig() *Config {
 				LLMTimeout: 30,
 				LLMMaxRetries: 3,
 			},
-			AIBOM:     "cisco-aibom",
 			CodeGuard: filepath.Join(dataDir, "codeguard-rules"),
 		},
 		OpenShell: OpenShellConfig{

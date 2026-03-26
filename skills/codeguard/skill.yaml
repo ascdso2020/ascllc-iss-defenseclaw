@@ -1,0 +1,11 @@
+name: codeguard
+version: "1.0.0"
+description: Security-aware code generation — teaches the agent CodeGuard rules to write secure code by default
+author: defenseclaw
+
+capabilities:
+  - text-generation
+  - code-generation
+
+permissions:
+  - read-only

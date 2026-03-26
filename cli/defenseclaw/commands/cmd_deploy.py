@@ -113,14 +113,12 @@ def _ensure_init(app: AppContext) -> None:
 
 
 def _run_all_scanners(app: AppContext, target: str) -> list[tuple[str, str, ScanResult | None, str]]:
-    from defenseclaw.scanner.aibom import AIBOMScannerWrapper
     from defenseclaw.scanner.mcp import MCPScannerWrapper
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     scanners = [
         SkillScannerWrapper(app.cfg.scanners.skill_scanner),
         MCPScannerWrapper(app.cfg.scanners.mcp_scanner),
-        AIBOMScannerWrapper(app.cfg.scanners.aibom),
     ]
 
     runs: list[tuple[str, str, ScanResult | None, str]] = []
@@ -145,7 +143,93 @@ def _run_all_scanners(app: AppContext, target: str) -> list[tuple[str, str, Scan
             click.echo(f"    Error: {exc}")
             runs.append((s.name(), target, None, str(exc)))
 
+    codeguard_result = _run_codeguard(target)
+    if codeguard_result is not None:
+        runs.append(codeguard_result)
+        _, _, result, err = codeguard_result
+        if result and app.logger:
+            app.logger.log_scan(result)
+
     return runs
+
+
+def _run_codeguard(target: str) -> tuple[str, str, ScanResult | None, str] | None:
+    """Run CodeGuard via the Go sidecar binary (defenseclaw scan code)."""
+    import json
+    import subprocess
+
+    click.echo(f"  [scan] codeguard -> {target}")
+
+    binary = shutil.which("defenseclaw-gateway") or shutil.which("defenseclaw")
+    if not binary:
+        click.echo("    Skipped (defenseclaw binary not found)")
+        return ("codeguard", target, None, "binary not found")
+
+    try:
+        proc = subprocess.run(
+            [binary, "scan", "code", target, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        click.echo("    Error: scan timed out")
+        return ("codeguard", target, None, "timeout")
+    except FileNotFoundError:
+        click.echo("    Skipped (binary not executable)")
+        return ("codeguard", target, None, "not executable")
+
+    if proc.returncode != 0 and not proc.stdout.strip():
+        err_msg = proc.stderr.strip()[:200] if proc.stderr else f"exit code {proc.returncode}"
+        click.echo(f"    Error: {err_msg}")
+        return ("codeguard", target, None, err_msg)
+
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        click.echo("    Error: invalid JSON output")
+        return ("codeguard", target, None, "invalid JSON output")
+
+    from datetime import timedelta
+
+    findings_raw = data.get("findings", [])
+    findings = []
+    for f in findings_raw:
+        from defenseclaw.models import Finding as PyFinding
+
+        findings.append(
+            PyFinding(
+                id=f.get("id", ""),
+                severity=f.get("severity", "INFO"),
+                title=f.get("title", ""),
+                description=f.get("description", ""),
+                location=f.get("location", ""),
+                remediation=f.get("remediation", ""),
+                scanner=f.get("scanner", "codeguard"),
+                tags=f.get("tags", []),
+            )
+        )
+
+    from datetime import datetime
+
+    duration_ns = data.get("duration", 0)
+    result = ScanResult(
+        scanner="codeguard",
+        target=target,
+        timestamp=datetime.utcnow(),
+        findings=findings,
+        duration=timedelta(seconds=duration_ns / 1_000_000_000),
+    )
+
+    if result.is_clean():
+        click.echo(f"    Clean ({result.duration.total_seconds():.2f}s)")
+    else:
+        click.echo(
+            f"    Findings: {len(result.findings)} "
+            f"(max: {result.max_severity()}, {result.duration.total_seconds():.2f}s)"
+        )
+
+    return ("codeguard", target, result, "")
 
 
 def _auto_block(

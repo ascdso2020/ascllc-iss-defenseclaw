@@ -42,7 +42,6 @@ def status(app: AppContext) -> None:
     scanner_bins = [
         ("skill-scanner", cfg.scanners.skill_scanner.binary),
         ("mcp-scanner", cfg.scanners.mcp_scanner.binary),
-        ("cisco-aibom", cfg.scanners.aibom),
         ("codeguard", "built-in"),
     ]
     for name, binary in scanner_bins:

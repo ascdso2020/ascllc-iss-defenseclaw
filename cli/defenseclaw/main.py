@@ -13,6 +13,7 @@ import click
 from defenseclaw import __version__
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
+from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.commands.cmd_deploy import deploy
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_mcp import mcp
@@ -64,6 +65,8 @@ def cli(ctx: click.Context) -> None:
         )
         raise SystemExit(1)
 
+    _ensure_codeguard_skill(app.cfg)
+
     try:
         app.store = Store(app.cfg.audit_db)
     except Exception as exc:
@@ -96,6 +99,17 @@ cli.add_command(mcp)
 cli.add_command(aibom)
 cli.add_command(status)
 cli.add_command(alerts)
+cli.add_command(codeguard)
+
+
+def _ensure_codeguard_skill(cfg) -> None:
+    """Install CodeGuard skill if OpenClaw appeared since last init."""
+    try:
+        from defenseclaw.codeguard_skill import ensure_codeguard_skill
+
+        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file)
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

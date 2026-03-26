@@ -68,7 +68,9 @@ class TestInitCommand(unittest.TestCase):
         store = Store(db_path)
         events = store.list_events(10)
         self.assertTrue(len(events) >= 1)
-        self.assertEqual(events[0].action, "init")
+        init_events = [e for e in events if e.action == "init"]
+        self.assertEqual(len(init_events), 1, f"expected exactly one 'init' event, got actions: {[e.action for e in events]}")
+        self.assertEqual(init_events[0].action, "init")
         store.close()
 
     @patch("defenseclaw.commands.cmd_init.shutil.which", return_value=None)

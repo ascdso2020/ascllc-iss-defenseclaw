@@ -88,6 +88,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
+	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 
 	srv := &http.Server{
 		Addr:    a.addr,
@@ -1245,4 +1246,46 @@ func findPolicyListEntry(entries []policy.ListEntry, targetType, targetName stri
 		}
 	}
 	return false, ""
+}
+
+// codeScanRequest is the payload for POST /api/v1/scan/code.
+type codeScanRequest struct {
+	Path string `json:"path"`
+}
+
+// handleCodeScan runs CodeGuard on the given filesystem path and returns
+// the ScanResult with OTel signals emitted via the shared audit logger.
+func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req codeScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if req.Path == "" {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path is required"})
+		return
+	}
+
+	rulesDir := ""
+	if a.scannerCfg != nil {
+		rulesDir = a.scannerCfg.Scanners.CodeGuard
+	}
+	cg := scanner.NewCodeGuardScanner(rulesDir)
+
+	result, err := cg.Scan(r.Context(), req.Path)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if a.logger != nil {
+		_ = a.logger.LogScan(result)
+	}
+
+	a.writeJSON(w, http.StatusOK, result)
 }

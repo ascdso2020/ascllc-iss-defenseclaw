@@ -27,6 +27,36 @@ func (s *CodeGuardScanner) Name() string              { return "codeguard" }
 func (s *CodeGuardScanner) Version() string            { return "1.0.0" }
 func (s *CodeGuardScanner) SupportedTargets() []string { return []string{"code"} }
 
+// ScanContent scans an in-memory code string against builtin rules.
+// The filename is used for extension-based rule filtering and finding locations.
+func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
+	ext := filepath.Ext(filename)
+	var findings []Finding
+
+	lines := strings.Split(content, "\n")
+	for lineNum, line := range lines {
+		for _, r := range builtinRules {
+			if len(r.extensions) > 0 && !extMatch(ext, r.extensions) {
+				continue
+			}
+			if r.pattern.MatchString(line) {
+				findings = append(findings, Finding{
+					ID:          r.id,
+					Severity:    r.severity,
+					Title:       r.title,
+					Description: strings.TrimSpace(line),
+					Location:    fmt.Sprintf("%s:%d", filename, lineNum+1),
+					Remediation: r.remediation,
+					Scanner:     "codeguard",
+					Tags:        []string{"codeguard"},
+				})
+			}
+		}
+	}
+
+	return findings
+}
+
 func (s *CodeGuardScanner) Scan(_ context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
 
@@ -68,6 +98,11 @@ var codeExtensions = map[string]bool{
 	".java": true, ".rb": true, ".php": true, ".sh": true,
 	".yaml": true, ".yml": true, ".json": true, ".xml": true,
 	".c": true, ".cpp": true, ".h": true, ".rs": true,
+}
+
+// IsCodeFile reports whether the given file extension is one CodeGuard scans.
+func IsCodeFile(ext string) bool {
+	return codeExtensions[ext]
 }
 
 func collectCodeFiles(root string) ([]string, error) {
@@ -215,6 +250,31 @@ func scanFile(path string) ([]Finding, error) {
 	}
 
 	return findings, scanner.Err()
+}
+
+// RuleMeta exposes rule metadata for skill generation without leaking the
+// compiled regexp.
+type RuleMeta struct {
+	ID          string
+	Severity    Severity
+	Title       string
+	Remediation string
+	Extensions  []string
+}
+
+// BuiltinRulesMeta returns metadata for all builtin CodeGuard rules.
+func BuiltinRulesMeta() []RuleMeta {
+	out := make([]RuleMeta, len(builtinRules))
+	for i, r := range builtinRules {
+		out[i] = RuleMeta{
+			ID:          r.id,
+			Severity:    r.severity,
+			Title:       r.title,
+			Remediation: r.remediation,
+			Extensions:  r.extensions,
+		}
+	}
+	return out
 }
 
 func extMatch(ext string, exts []string) bool {

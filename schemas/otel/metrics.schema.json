@@ -18,12 +18,12 @@
           "attributes": {
             "scanner": {
               "type": "string",
-              "enum": ["skill-scanner", "mcp-scanner", "cisco-aibom"],
+              "enum": ["skill-scanner", "mcp-scanner", "cisco-aibom", "codeguard"],
               "description": "Scanner that performed the scan."
             },
             "target_type": {
               "type": "string",
-              "enum": ["skill", "mcp", "plugin"]
+              "enum": ["skill", "mcp", "plugin", "code"]
             },
             "verdict": {
               "type": "string",
@@ -38,7 +38,7 @@
           "description": "Scan duration distribution.",
           "attributes": {
             "scanner": { "type": "string" },
-            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin"] }
+            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin", "code"] }
           }
         },
         {
@@ -48,7 +48,7 @@
           "description": "Total findings across all scans.",
           "attributes": {
             "scanner": { "type": "string" },
-            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin"] },
+            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin", "code"] },
             "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] }
           }
         },
@@ -58,7 +58,7 @@
           "unit": "{finding}",
           "description": "Current open finding count (latest state).",
           "attributes": {
-            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin"] },
+            "target_type": { "type": "string", "enum": ["skill", "mcp", "plugin", "code"] },
             "severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"] }
           }
         }
@@ -156,7 +156,7 @@
           "attributes": {
             "alert.type": {
               "type": "string",
-              "enum": ["dangerous-command", "guardrail-flag", "guardrail-block", "prompt-injection", "data-exfiltration", "content-violation"]
+              "enum": ["dangerous-command", "guardrail-flag", "guardrail-block", "prompt-injection", "data-exfiltration", "content-violation", "codeguard-finding"]
             },
             "alert.severity": { "type": "string", "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW"] },
             "alert.source": { "type": "string", "enum": ["local-pattern", "local-guardrail", "ai-defense", "opa-policy", "codeguard"] }
@@ -168,8 +168,8 @@
           "unit": "{evaluation}",
           "description": "Total guardrail evaluations performed.",
           "attributes": {
-            "guardrail.scanner": { "type": "string", "enum": ["ai-defense", "skill-scanner", "opa"] },
-            "guardrail.action_taken": { "type": "string", "enum": ["log", "warn", "block", "deny"] }
+            "guardrail.scanner": { "type": "string", "enum": ["ai-defense", "skill-scanner", "opa", "codeguard"] },
+            "guardrail.action_taken": { "type": "string", "enum": ["log", "warn", "block", "deny", "allow", "alert"] }
           }
         },
         {
@@ -178,7 +178,7 @@
           "unit": "ms",
           "description": "Guardrail evaluation latency distribution.",
           "attributes": {
-            "guardrail.scanner": { "type": "string", "enum": ["ai-defense", "skill-scanner", "opa"] }
+            "guardrail.scanner": { "type": "string", "enum": ["ai-defense", "skill-scanner", "opa", "codeguard"] }
           }
         }
       ]

@@ -148,7 +148,6 @@ type ScannersConfig struct {
 	SkillScanner  SkillScannerConfig `mapstructure:"skill_scanner"  yaml:"skill_scanner"`
 	MCPScanner    MCPScannerConfig   `mapstructure:"mcp_scanner"    yaml:"mcp_scanner"`
 	PluginScanner string             `mapstructure:"plugin_scanner" yaml:"plugin_scanner"`
-	AIBOM         string             `mapstructure:"aibom"           yaml:"aibom"`
 	CodeGuard     string             `mapstructure:"codeguard"       yaml:"codeguard"`
 }
 
@@ -353,7 +352,6 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("scanners.mcp_scanner.scan_resources", false)
 	viper.SetDefault("scanners.mcp_scanner.scan_instructions", false)
 	viper.SetDefault("scanners.plugin_scanner", "defenseclaw-plugin-scanner")
-	viper.SetDefault("scanners.aibom", "cisco-aibom")
 	viper.SetDefault("scanners.codeguard", filepath.Join(dataDir, "codeguard-rules"))
 	viper.SetDefault("openshell.binary", "openshell")
 	viper.SetDefault("openshell.policy_dir", "/etc/openshell/policies")

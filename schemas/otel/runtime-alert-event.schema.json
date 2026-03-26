@@ -74,7 +74,8 @@
             "guardrail-block",
             "prompt-injection",
             "data-exfiltration",
-            "content-violation"
+            "content-violation",
+            "codeguard-finding"
           ],
           "description": "Classification of the alert."
         },
@@ -112,7 +113,7 @@
         },
         "defenseclaw.guardrail.scanner": {
           "type": "string",
-          "enum": ["ai-defense", "skill-scanner", "opa"],
+          "enum": ["ai-defense", "skill-scanner", "opa", "codeguard"],
           "description": "Guardrail scanner identifier."
         },
         "defenseclaw.guardrail.policy": {

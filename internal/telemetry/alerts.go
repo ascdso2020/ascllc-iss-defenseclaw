@@ -15,7 +15,8 @@ const (
 	AlertGuardrailBlock   = "guardrail-block"
 	AlertPromptInjection  = "prompt-injection"
 	AlertDataExfiltration = "data-exfiltration"
-	AlertContentViolation = "content-violation"
+	AlertContentViolation  = "content-violation"
+	AlertCodeGuardFinding  = "codeguard-finding"
 )
 
 // AlertSource constants for defenseclaw.alert.source.

@@ -18,7 +18,7 @@
  */
 
 import type { PluginApi } from "@openclaw/plugin-sdk";
-import { PolicyEnforcer, runSkillScan } from "./policy/enforcer.js";
+import { PolicyEnforcer, runSkillScan, runCodeScan } from "./policy/enforcer.js";
 import { scanPlugin } from "./scanners/plugin_scanner/index.js";
 import { scanMCPServer } from "./scanners/mcp-scanner.js";
 import type {
@@ -63,7 +63,10 @@ export default function (api: PluginApi) {
     try {
       const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-DefenseClaw-Client": "openclaw-plugin",
+        },
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -121,15 +124,15 @@ export default function (api: PluginApi) {
 
   api.registerCommand({
     name: "scan",
-    description: "Scan a skill, plugin, or MCP config with DefenseClaw",
+    description: "Scan a skill, plugin, MCP config, or source code with DefenseClaw",
     args: [
-      { name: "target", description: "Path to skill/plugin directory or MCP config", required: true },
-      { name: "type", description: "Scan type: skill (default), plugin, mcp", required: false },
+      { name: "target", description: "Path to skill/plugin directory, MCP config, or source code", required: true },
+      { name: "type", description: "Scan type: skill (default), plugin, mcp, code", required: false },
     ],
     handler: async ({ args }) => {
       const target = args.target as string | undefined;
       if (!target) {
-        return { text: "Usage: /scan <path> [skill|plugin|mcp]" };
+        return { text: "Usage: /scan <path> [skill|plugin|mcp|code]" };
       }
 
       const scanType = (args.type ?? "skill") as string;
@@ -140,6 +143,10 @@ export default function (api: PluginApi) {
 
       if (scanType === "mcp") {
         return handleMCPScan(target);
+      }
+
+      if (scanType === "code") {
+        return handleCodeScan(target, SIDECAR_API);
       }
 
       return handleSkillScan(target);
@@ -219,6 +226,17 @@ async function handleMCPScan(target: string): Promise<{ text: string }> {
   } catch (err) {
     return {
       text: `MCP scan failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+async function handleCodeScan(target: string, sidecarApi: string): Promise<{ text: string }> {
+  try {
+    const result = await runCodeScan(target, sidecarApi);
+    return { text: formatScanOutput("Code", target, result) };
+  } catch (err) {
+    return {
+      text: `Code scan failed: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
 }

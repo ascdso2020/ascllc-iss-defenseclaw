@@ -40,7 +40,6 @@ def make_temp_config(tmp_dir: str | None = None) -> Config:
         scanners=ScannersConfig(
             skill_scanner=SkillScannerConfig(binary="skill-scanner"),
             mcp_scanner=MCPScannerConfig(binary="mcp-scanner"),
-            aibom="cisco-aibom",
         ),
         openshell=OpenShellConfig(binary="openshell"),
         gateway=GatewayConfig(host="127.0.0.1", api_port=18790),

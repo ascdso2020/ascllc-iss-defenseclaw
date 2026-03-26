@@ -59,6 +59,63 @@ export function runSkillScan(
   });
 }
 
+/**
+ * Run a CodeGuard code scan via the Go sidecar API.
+ * Unlike skill scans (which shell out), CodeGuard is built into the sidecar binary.
+ */
+export async function runCodeScan(
+  target: string,
+  sidecarBaseUrl: string,
+  timeoutMs = 30_000,
+): Promise<ScanResult> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${sidecarBaseUrl}/api/v1/scan/code`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-DefenseClaw-Client": "openclaw-plugin",
+      },
+      body: JSON.stringify({ path: target }),
+      signal: controller.signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`sidecar returned HTTP ${res.status}: ${body.slice(0, 200)}`);
+    }
+
+    const data = (await res.json()) as Record<string, unknown>;
+    const findings: Finding[] = (
+      (data.findings as Record<string, unknown>[]) ?? []
+    ).map((f) => ({
+      id: (f.id as string) ?? "",
+      severity: ((f.severity as string) ?? "INFO") as Severity,
+      title: (f.title as string) ?? "",
+      description: (f.description as string) ?? "",
+      location: (f.location as string) ?? "",
+      remediation: (f.remediation as string) ?? "",
+      scanner: (f.scanner as string) ?? "codeguard",
+      tags: (f.tags as string[]) ?? [],
+    }));
+
+    return {
+      scanner: "codeguard",
+      target,
+      timestamp: new Date().toISOString(),
+      findings,
+    };
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error("code scan timed out");
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface EnforcerConfig {
   blockOnSeverity: Severity;
   warnOnSeverity: Severity;

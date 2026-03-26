@@ -92,48 +92,6 @@ class TestAlertsCommand(unittest.TestCase):
         self.assertIn("Security Alerts", result.output)
 
 
-# ── aibom ─────────────────────────────────────────────────────────────────
-
-class TestAibomCommand(unittest.TestCase):
-    @patch("defenseclaw.scanner.aibom.AIBOMScannerWrapper")
-    def test_aibom_clean(self, MockScanner):
-        from defenseclaw.commands.cmd_aibom import aibom
-
-        mock_instance = MockScanner.return_value
-        mock_instance.scan.return_value = ScanResult(
-            scanner="aibom", target=".", timestamp=datetime.now(timezone.utc),
-        )
-
-        result = _invoke(aibom, ["generate", "."], app=_make_app())
-        self.assertEqual(result.exit_code, 0)
-        self.assertIn("Generating AIBOM", result.output)
-
-    @patch("defenseclaw.scanner.aibom.AIBOMScannerWrapper")
-    def test_aibom_json_output(self, MockScanner):
-        from defenseclaw.commands.cmd_aibom import aibom
-
-        mock_instance = MockScanner.return_value
-        mock_instance.scan.return_value = ScanResult(
-            scanner="aibom", target=".", timestamp=datetime.now(timezone.utc),
-            findings=[Finding(id="f1", severity="INFO", title="Inventory")],
-        )
-
-        result = _invoke(aibom, ["generate", ".", "--json"], app=_make_app())
-        self.assertEqual(result.exit_code, 0)
-        self.assertIn('"scanner": "aibom"', result.output)
-
-    @patch("defenseclaw.scanner.aibom.AIBOMScannerWrapper")
-    def test_aibom_scan_failure(self, MockScanner):
-        from defenseclaw.commands.cmd_aibom import aibom
-
-        mock_instance = MockScanner.return_value
-        mock_instance.scan.side_effect = RuntimeError("scan broke")
-
-        runner = CliRunner()
-        result = runner.invoke(aibom, ["generate", "."], obj=_make_app())
-        self.assertNotEqual(result.exit_code, 0)
-
-
 # ── sidecar ───────────────────────────────────────────────────────────────
 
 class TestSidecarCommand(unittest.TestCase):

@@ -910,7 +910,9 @@ def _parse_mcp(raw: Any) -> list[dict[str, Any]]:
     if raw is None:
         return []
     if isinstance(raw, dict):
-        servers = raw.get("servers") or raw.get("mcpServers", {})
+        servers = raw.get("servers") or raw.get("mcpServers")
+        if not servers:
+            servers = raw
         if isinstance(servers, dict):
             rows: list[dict[str, Any]] = []
             for name, spec in servers.items():
@@ -918,6 +920,8 @@ def _parse_mcp(raw: Any) -> list[dict[str, Any]]:
                 if isinstance(spec, dict):
                     if spec.get("command"):
                         row["command"] = spec["command"]
+                    if spec.get("args"):
+                        row["args"] = spec["args"]
                     if spec.get("url"):
                         row["url"] = spec["url"]
                     if spec.get("transport"):

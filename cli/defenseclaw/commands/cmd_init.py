@@ -78,6 +78,9 @@ def init_cmd(app: AppContext, skip_install: bool) -> None:
     _install_guardrail(cfg, logger, skip_install)
 
     click.echo()
+    _install_codeguard_skill(cfg, logger)
+
+    click.echo()
     if shutil.which(cfg.openshell.binary):
         click.echo("  OpenShell: found")
     elif env == "macos":
@@ -272,3 +275,27 @@ def _add_uv_to_path() -> None:
             os.environ["PATH"] = extra + ":" + os.environ.get("PATH", "")
 
 
+def _install_with_uv(pkg: str) -> bool:
+    uv = shutil.which("uv")
+    if not uv:
+        return False
+    try:
+        result = subprocess.run(
+            [uv, "tool", "install", "--python", "3.13", pkg],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0 or "already installed" in result.stderr:
+            return True
+        return False
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def _install_codeguard_skill(cfg, logger) -> None:
+    """Install the CodeGuard proactive skill into the OpenClaw skills directory."""
+    from defenseclaw.codeguard_skill import install_codeguard_skill
+
+    click.echo("  CodeGuard skill: installing...", nl=False)
+    status = install_codeguard_skill(cfg)
+    click.echo(f" {status}")
+    logger.log_action("install-skill", "codeguard", f"status={status}")

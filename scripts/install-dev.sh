@@ -368,6 +368,15 @@ install_python_cli() {
     log_info "Scanner dependencies skipped (litellm unavailable on PyPI)"
     log_info "Once restored, install manually: pip install cisco-ai-skill-scanner"
     
+    # Install dev dependencies (ruff, pytest, pytest-cov)
+    log_info "Installing Python dev dependencies..."
+    if [[ "${PACKAGE_MANAGER}" == "uv" ]]; then
+        uv pip install --group dev --python "${VENV_DIR}/bin/python"
+    else
+        ${pip_cmd} ruff pytest pytest-cov
+    fi
+    log_success "Dev dependencies installed"
+
     # Verify the CLI works
     if "${VENV_DIR}/bin/defenseclaw" --help &> /dev/null; then
         log_success "CLI verification passed"
