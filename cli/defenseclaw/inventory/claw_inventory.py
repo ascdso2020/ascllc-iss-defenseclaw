@@ -193,18 +193,31 @@ def enrich_with_policy(
             if not name:
                 continue
 
+            scan_entry = scan_map.get(name)
             verdict, detail = _admission_verdict(
                 pe, target_type, name,
-                scan_map.get(name), actions_map.get(name),
+                scan_entry, actions_map.get(name),
                 skill_actions,
             )
             item["policy_verdict"] = verdict
             item["policy_detail"] = detail
+            if scan_entry:
+                item["scan_findings"] = scan_entry["finding_count"]
+                item["scan_severity"] = scan_entry["max_severity"]
+                item["scan_target"] = scan_entry.get("target", "")
             counts[verdict] = counts.get(verdict, 0) + 1
+
+        scanned = sum(1 for it in items if "scan_findings" in it)
+        total_findings = sum(it.get("scan_findings", 0) for it in items)
 
         summary = inv.get("summary")
         if summary:
             summary[f"policy_{inv_key}"] = counts
+            summary[f"scan_{inv_key}"] = {
+                "scanned": scanned,
+                "unscanned": len(items) - scanned,
+                "total_findings": total_findings,
+            }
 
 
 # keep the old name as an alias for backward compatibility
@@ -382,15 +395,21 @@ def _render_summary(console: Any, inv: dict[str, Any]) -> None:
 
     sk = data.get("skills", {})
     sk_detail = f"{sk.get('eligible', 0)} eligible"
+    sk_detail += _scan_detail_suffix(data.get("scan_skills"))
     sk_detail += _policy_detail_suffix(data.get("policy_skills"))
     table.add_row("Skills", str(sk.get("count", 0)), sk_detail)
 
     pl = data.get("plugins", {})
     pl_detail = f"{pl.get('loaded', 0)} loaded, {pl.get('disabled', 0)} disabled"
+    pl_detail += _scan_detail_suffix(data.get("scan_plugins"))
     pl_detail += _policy_detail_suffix(data.get("policy_plugins"))
     table.add_row("Plugins", str(pl.get("count", 0)), pl_detail)
 
-    mcp_detail = _policy_detail_suffix(data.get("policy_mcp")).lstrip(" · ") or ""
+    mcp_detail = ""
+    mcp_detail += _scan_detail_suffix(data.get("scan_mcp")).lstrip(" · ")
+    mcp_detail += _policy_detail_suffix(data.get("policy_mcp"))
+    if mcp_detail.startswith(" · "):
+        mcp_detail = mcp_detail.lstrip(" · ")
     table.add_row("MCP servers", str(data.get("mcp", {}).get("count", 0)), mcp_detail)
     table.add_row("Agents", str(data.get("agents", {}).get("count", 0)))
     table.add_row("Tools", str(data.get("tools", {}).get("count", 0)))
@@ -416,6 +435,19 @@ def _policy_detail_suffix(policy: dict[str, int] | None) -> str:
     return " · " + ", ".join(parts) if parts else ""
 
 
+def _scan_detail_suffix(scan: dict[str, int] | None) -> str:
+    if not scan:
+        return ""
+    scanned = scan.get("scanned", 0)
+    findings = scan.get("total_findings", 0)
+    if scanned == 0:
+        return ""
+    parts = [f"{scanned} scanned"]
+    if findings:
+        parts.append(f"[yellow]{findings} findings[/yellow]")
+    return " · " + ", ".join(parts)
+
+
 _VERDICT_STYLES: dict[str, tuple[str, str]] = {
     "blocked": ("bold red", "⛔ blocked"),
     "rejected": ("red", "✗ rejected"),
@@ -436,12 +468,15 @@ def _render_skills(console: Any, skills: list[dict[str, Any]]) -> None:
     eligible = [s for s in skills if s.get("eligible")]
     ineligible = [s for s in skills if not s.get("eligible")]
     has_policy = any(s.get("policy_verdict") for s in skills)
+    has_scan = any("scan_findings" in s for s in skills)
 
     if eligible:
         table = Table(title=f"Skills — eligible ({len(eligible)})")
         table.add_column("Name", style="green bold")
         table.add_column("Source")
         table.add_column("Description", max_width=50)
+        if has_scan:
+            table.add_column("Findings", min_width=12)
         if has_policy:
             table.add_column("Policy", min_width=14)
         for s in eligible:
@@ -450,6 +485,8 @@ def _render_skills(console: Any, skills: list[dict[str, Any]]) -> None:
                 s.get("source", ""),
                 _trunc(s.get("description", ""), 50),
             ]
+            if has_scan:
+                row.append(_format_scan(s))
             if has_policy:
                 row.append(_format_verdict(s))
             table.add_row(*row)
@@ -469,16 +506,36 @@ def _render_skills(console: Any, skills: list[dict[str, Any]]) -> None:
     console.print()
 
 
-def _format_verdict(skill: dict[str, Any]) -> str:
-    verdict = skill.get("policy_verdict", "")
+def _format_verdict(item: dict[str, Any]) -> str:
+    verdict = item.get("policy_verdict", "")
     if not verdict:
         return "[dim]-[/dim]"
     style, label = _VERDICT_STYLES.get(verdict, ("dim", verdict))
-    detail = skill.get("policy_detail", "")
+    detail = item.get("policy_detail", "")
     cell = f"[{style}]{label}[/{style}]"
     if detail and verdict in ("rejected", "warning"):
         cell += f"\n[dim]{_trunc(detail, 30)}[/dim]"
     return cell
+
+
+_SEVERITY_COLORS: dict[str, str] = {
+    "CRITICAL": "bold red",
+    "HIGH": "red",
+    "MEDIUM": "yellow",
+    "LOW": "cyan",
+    "INFO": "dim",
+}
+
+
+def _format_scan(item: dict[str, Any]) -> str:
+    n = item.get("scan_findings")
+    if n is None:
+        return "[dim]-[/dim]"
+    if n == 0:
+        return "[green]clean[/green]"
+    sev = item.get("scan_severity", "INFO")
+    color = _SEVERITY_COLORS.get(sev, "dim")
+    return f"[{color}]{n} ({sev})[/{color}]"
 
 
 def _render_plugins(console: Any, plugins: list[dict[str, Any]]) -> None:
@@ -491,18 +548,23 @@ def _render_plugins(console: Any, plugins: list[dict[str, Any]]) -> None:
     loaded = [p for p in plugins if p.get("enabled")]
     disabled = [p for p in plugins if not p.get("enabled")]
     has_policy = any(p.get("policy_verdict") for p in plugins)
+    has_scan = any("scan_findings" in p for p in plugins)
 
     table = Table(title=f"Plugins — loaded ({len(loaded)})")
     table.add_column("ID", style="bold")
     table.add_column("Origin")
     table.add_column("Providers")
     table.add_column("Tools")
+    if has_scan:
+        table.add_column("Findings", min_width=12)
     if has_policy:
         table.add_column("Policy", min_width=14)
     for p in loaded:
         provs = ", ".join(p.get("providerIds", []))
         tools = ", ".join(p.get("toolNames", []))
         row = [p.get("id", ""), p.get("origin", ""), provs or "-", tools or "-"]
+        if has_scan:
+            row.append(_format_scan(p))
         if has_policy:
             row.append(_format_verdict(p))
         table.add_row(*row)
@@ -527,12 +589,15 @@ def _render_mcp(console: Any, mcps: list[dict[str, Any]]) -> None:
     from rich.table import Table
 
     has_policy = any(m.get("policy_verdict") for m in mcps)
+    has_scan = any("scan_findings" in m for m in mcps)
 
     table = Table(title=f"MCP Servers ({len(mcps)})")
     table.add_column("Name", style="bold")
     table.add_column("Transport")
     table.add_column("Command / URL")
     table.add_column("Env keys")
+    if has_scan:
+        table.add_column("Findings", min_width=12)
     if has_policy:
         table.add_column("Policy", min_width=14)
     for m in mcps:
@@ -545,6 +610,8 @@ def _render_mcp(console: Any, mcps: list[dict[str, Any]]) -> None:
             _trunc(cmd_or_url, 50),
             ", ".join(m.get("env_keys", [])) or "-",
         ]
+        if has_scan:
+            row.append(_format_scan(m))
         if has_policy:
             row.append(_format_verdict(m))
         table.add_row(*row)
@@ -737,13 +804,20 @@ def _run_openclaw(*args: str) -> _CmdResult:
             return _CmdResult(data=json.loads(text), error=None, command=cmd_str)
         except json.JSONDecodeError:
             pass
-        # stderr may contain valid JSON followed by Node.js warnings;
-        # raw_decode stops at the end of the first JSON value.
-        try:
-            obj, _ = decoder.raw_decode(text)
-            return _CmdResult(data=obj, error=None, command=cmd_str)
-        except (json.JSONDecodeError, ValueError):
-            continue
+        # stderr may contain Node.js warnings before or after the JSON;
+        # find the earliest { or [ and try raw_decode from there.
+        candidates = []
+        for ch in ('{', '['):
+            pos = text.find(ch)
+            if pos >= 0:
+                candidates.append(pos)
+        for idx in sorted(candidates):
+            try:
+                obj, _ = decoder.raw_decode(text, idx)
+                return _CmdResult(data=obj, error=None, command=cmd_str)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        continue
 
     return _CmdResult(data=None, error="no JSON in output", command=cmd_str)
 

@@ -17,20 +17,29 @@ from unittest.mock import patch, MagicMock
 
 from click.testing import CliRunner
 
-from defenseclaw.config import ClawConfig, Config
+from defenseclaw.config import ClawConfig, Config, SkillActionsConfig, SeverityAction
+from defenseclaw.models import ActionEntry, ActionState
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
     _CmdResult,
+    _admission_verdict,
+    _build_actions_map_for_type,
+    _build_scan_map_for_type,
     _build_summary,
     _fetch_all,
+    _format_scan,
+    _format_verdict,
     _parse_skills,
     _parse_plugins,
     _parse_mcp,
     _parse_tools,
+    _policy_detail_suffix,
     _resolve_categories,
     _run_openclaw,
+    _scan_detail_suffix,
     build_claw_aibom,
     claw_aibom_to_scan_result,
+    enrich_with_policy,
     format_claw_aibom_human,
 )
 
@@ -678,6 +687,25 @@ class TestRunOpenclawUnit(unittest.TestCase):
         self.assertEqual(result.data["skills"][0]["name"], "test-skill")
         self.assertIsNone(result.error)
 
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_stderr_json_with_leading_warnings(self, mock_sub):
+        """Node.js warnings BEFORE JSON on stderr should still parse."""
+        warning = (
+            "(node:52830) [MODULE_TYPELESS_PACKAGE_JSON] Warning: "
+            "Module type not specified\n"
+            "Reparsing as ES module because module syntax was detected.\n"
+        )
+        json_part = '{"skills": [{"name": "leading-test"}]}'
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr=warning + json_part,
+        )
+        result = _run_openclaw("skills", "list")
+        self.assertIsNotNone(result.data)
+        self.assertEqual(result.data["skills"][0]["name"], "leading-test")
+        self.assertIsNone(result.error)
+
 
 class TestParserUnits(unittest.TestCase):
     """Unit tests for individual _parse_* functions."""
@@ -897,6 +925,835 @@ class TestLiveIsFalse(unittest.TestCase):
         self.assertEqual(inv["skills"], [])
         self.assertEqual(inv["errors"], [])
         self.assertFalse(inv["live"])
+
+
+# ---------------------------------------------------------------------------
+# Policy enrichment — _admission_verdict
+# ---------------------------------------------------------------------------
+
+
+class _StoreWithPolicyMixin:
+    """Provides a temp Store with init() for policy tests."""
+
+    def setUp(self) -> None:
+        from tests.helpers import make_temp_store
+        self.store, self.db_path = make_temp_store()
+        self.skill_actions = SkillActionsConfig()
+
+    def tearDown(self) -> None:
+        self.store.close()
+        try:
+            os.unlink(self.db_path)
+        except OSError:
+            pass
+
+    def _pe(self):
+        from defenseclaw.enforce import PolicyEngine
+        return PolicyEngine(self.store)
+
+
+class TestAdmissionVerdictBlocked(_StoreWithPolicyMixin, unittest.TestCase):
+    """Blocked items short-circuit before allow/scan checks."""
+
+    def test_blocked_with_reason(self):
+        pe = self._pe()
+        pe.block("skill", "bad-skill", "known malware")
+        entry = ActionEntry(
+            id="x", target_type="skill", target_name="bad-skill",
+            reason="known malware",
+        )
+        verdict, detail = _admission_verdict(
+            pe, "skill", "bad-skill", None, entry, self.skill_actions,
+        )
+        self.assertEqual(verdict, "blocked")
+        self.assertEqual(detail, "known malware")
+
+    def test_blocked_without_action_entry(self):
+        pe = self._pe()
+        pe.block("plugin", "evil-plugin", "blocked")
+        verdict, detail = _admission_verdict(
+            pe, "plugin", "evil-plugin", None, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "blocked")
+        self.assertEqual(detail, "block list")
+
+    def test_blocked_overrides_clean_scan(self):
+        pe = self._pe()
+        pe.block("skill", "dual-status", "policy override")
+        scan = {"finding_count": 0, "max_severity": "INFO", "target": "/x"}
+        entry = ActionEntry(
+            id="y", target_type="skill", target_name="dual-status",
+            reason="policy override",
+        )
+        verdict, _ = _admission_verdict(
+            pe, "skill", "dual-status", scan, entry, self.skill_actions,
+        )
+        self.assertEqual(verdict, "blocked")
+
+
+class TestAdmissionVerdictAllowed(_StoreWithPolicyMixin, unittest.TestCase):
+    """Allowed items skip scanning."""
+
+    def test_allowed_with_reason(self):
+        pe = self._pe()
+        pe.allow("skill", "trusted", "security team approved")
+        entry = ActionEntry(
+            id="a", target_type="skill", target_name="trusted",
+            reason="security team approved",
+        )
+        verdict, detail = _admission_verdict(
+            pe, "skill", "trusted", None, entry, self.skill_actions,
+        )
+        self.assertEqual(verdict, "allowed")
+        self.assertEqual(detail, "security team approved")
+
+    def test_allowed_without_action_entry(self):
+        pe = self._pe()
+        pe.allow("mcp", "local-server", "ok")
+        verdict, detail = _admission_verdict(
+            pe, "mcp", "local-server", None, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "allowed")
+        self.assertEqual(detail, "allow list")
+
+
+class TestAdmissionVerdictQuarantined(_StoreWithPolicyMixin, unittest.TestCase):
+    """Quarantined items are rejected."""
+
+    def test_quarantined(self):
+        pe = self._pe()
+        self.store.set_action_field("skill", "suspect", "file", "quarantine", "under review")
+        entry = ActionEntry(
+            id="q", target_type="skill", target_name="suspect",
+            reason="under review",
+        )
+        verdict, detail = _admission_verdict(
+            pe, "skill", "suspect", None, entry, self.skill_actions,
+        )
+        self.assertEqual(verdict, "rejected")
+        self.assertIn("quarantined", detail)
+        self.assertIn("under review", detail)
+
+    def test_quarantined_without_action_entry(self):
+        pe = self._pe()
+        self.store.set_action_field("plugin", "risky", "file", "quarantine", "auto")
+        verdict, detail = _admission_verdict(
+            pe, "plugin", "risky", None, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "rejected")
+        self.assertIn("quarantined", detail)
+
+
+class TestAdmissionVerdictUnscanned(_StoreWithPolicyMixin, unittest.TestCase):
+    """Items with no block/allow/quarantine and no scan are unscanned."""
+
+    def test_unscanned(self):
+        pe = self._pe()
+        verdict, detail = _admission_verdict(
+            pe, "skill", "new-skill", None, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "unscanned")
+        self.assertEqual(detail, "no scan result")
+
+
+class TestAdmissionVerdictClean(_StoreWithPolicyMixin, unittest.TestCase):
+    """Items with scan results and zero findings are clean."""
+
+    def test_clean_scan(self):
+        pe = self._pe()
+        scan = {"finding_count": 0, "max_severity": "INFO", "target": "/x"}
+        verdict, detail = _admission_verdict(
+            pe, "skill", "safe-skill", scan, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "clean")
+        self.assertEqual(detail, "scan clean")
+
+
+class TestAdmissionVerdictRejected(_StoreWithPolicyMixin, unittest.TestCase):
+    """HIGH/CRITICAL findings trigger rejection with default config."""
+
+    def test_rejected_critical(self):
+        pe = self._pe()
+        scan = {"finding_count": 1, "max_severity": "CRITICAL", "target": "/x"}
+        verdict, detail = _admission_verdict(
+            pe, "skill", "dangerous", scan, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "rejected")
+        self.assertIn("1 findings", detail)
+        self.assertIn("CRITICAL", detail)
+
+    def test_rejected_high(self):
+        pe = self._pe()
+        scan = {"finding_count": 5, "max_severity": "HIGH", "target": "/x"}
+        verdict, detail = _admission_verdict(
+            pe, "plugin", "risky-plugin", scan, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "rejected")
+        self.assertIn("5 findings", detail)
+        self.assertIn("HIGH", detail)
+
+
+class TestAdmissionVerdictWarning(_StoreWithPolicyMixin, unittest.TestCase):
+    """MEDIUM/LOW findings produce warnings with default config."""
+
+    def test_warning_medium(self):
+        pe = self._pe()
+        scan = {"finding_count": 2, "max_severity": "MEDIUM", "target": "/x"}
+        verdict, detail = _admission_verdict(
+            pe, "skill", "so-so", scan, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "warning")
+        self.assertIn("2 findings", detail)
+        self.assertIn("MEDIUM", detail)
+
+    def test_warning_low(self):
+        pe = self._pe()
+        scan = {"finding_count": 1, "max_severity": "LOW", "target": "/x"}
+        verdict, detail = _admission_verdict(
+            pe, "mcp", "minor-issues", scan, None, self.skill_actions,
+        )
+        self.assertEqual(verdict, "warning")
+        self.assertIn("LOW", detail)
+
+    def test_custom_actions_can_reject_medium(self):
+        """Custom SkillActionsConfig can escalate MEDIUM to rejected."""
+        pe = self._pe()
+        strict = SkillActionsConfig(
+            medium=SeverityAction(file="quarantine", runtime="disable", install="block"),
+        )
+        scan = {"finding_count": 3, "max_severity": "MEDIUM", "target": "/x"}
+        verdict, _ = _admission_verdict(
+            pe, "skill", "strict-check", scan, None, strict,
+        )
+        self.assertEqual(verdict, "rejected")
+
+
+# ---------------------------------------------------------------------------
+# Policy enrichment — map builders
+# ---------------------------------------------------------------------------
+
+
+class TestBuildActionsMap(_StoreWithPolicyMixin, unittest.TestCase):
+
+    def test_empty_store(self):
+        result = _build_actions_map_for_type(self.store, "skill")
+        self.assertEqual(result, {})
+
+    def test_with_entries(self):
+        pe = self._pe()
+        pe.block("skill", "a", "reason-a")
+        pe.allow("skill", "b", "reason-b")
+        result = _build_actions_map_for_type(self.store, "skill")
+        self.assertIn("a", result)
+        self.assertIn("b", result)
+        self.assertEqual(result["a"].reason, "reason-a")
+
+    def test_different_target_types(self):
+        pe = self._pe()
+        pe.block("skill", "s1", "x")
+        pe.block("plugin", "p1", "y")
+        skill_map = _build_actions_map_for_type(self.store, "skill")
+        plugin_map = _build_actions_map_for_type(self.store, "plugin")
+        self.assertIn("s1", skill_map)
+        self.assertNotIn("p1", skill_map)
+        self.assertIn("p1", plugin_map)
+
+    def test_exception_returns_empty(self):
+        broken = MagicMock()
+        broken.list_actions_by_type.side_effect = RuntimeError("db error")
+        result = _build_actions_map_for_type(broken, "skill")
+        self.assertEqual(result, {})
+
+
+class TestBuildScanMap(_StoreWithPolicyMixin, unittest.TestCase):
+
+    def test_empty_store(self):
+        result = _build_scan_map_for_type(self.store, "skill-scanner")
+        self.assertEqual(result, {})
+
+    def test_with_scan_results(self):
+        import uuid
+        from datetime import datetime, timezone
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/path/to/my-skill",
+            datetime.now(timezone.utc), 500, 2, "HIGH", "{}",
+        )
+        result = _build_scan_map_for_type(self.store, "skill-scanner")
+        self.assertIn("my-skill", result)
+        self.assertEqual(result["my-skill"]["finding_count"], 2)
+        self.assertEqual(result["my-skill"]["max_severity"], "HIGH")
+
+    def test_basename_keying(self):
+        """Scan targets are keyed by basename, not full path."""
+        import uuid
+        from datetime import datetime, timezone
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "plugin-scanner",
+            "/long/path/to/web-search",
+            datetime.now(timezone.utc), 100, 0, "INFO", "{}",
+        )
+        result = _build_scan_map_for_type(self.store, "plugin-scanner")
+        self.assertIn("web-search", result)
+        self.assertNotIn("/long/path/to/web-search", result)
+
+    def test_null_severity_defaults_to_info(self):
+        import uuid
+        from datetime import datetime, timezone
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "mcp-scanner", "/mcp/test",
+            datetime.now(timezone.utc), 200, 0, None, "{}",
+        )
+        result = _build_scan_map_for_type(self.store, "mcp-scanner")
+        self.assertEqual(result["test"]["max_severity"], "INFO")
+
+    def test_exception_returns_empty(self):
+        broken = MagicMock()
+        broken.latest_scans_by_scanner.side_effect = RuntimeError("db error")
+        result = _build_scan_map_for_type(broken, "skill-scanner")
+        self.assertEqual(result, {})
+
+
+# ---------------------------------------------------------------------------
+# Policy enrichment — formatters
+# ---------------------------------------------------------------------------
+
+
+class TestFormatVerdict(unittest.TestCase):
+
+    def test_no_verdict(self):
+        self.assertEqual(_format_verdict({}), "[dim]-[/dim]")
+
+    def test_blocked(self):
+        out = _format_verdict({"policy_verdict": "blocked"})
+        self.assertIn("blocked", out)
+        self.assertIn("bold red", out)
+
+    def test_rejected_with_detail(self):
+        out = _format_verdict({
+            "policy_verdict": "rejected",
+            "policy_detail": "3 findings, max HIGH",
+        })
+        self.assertIn("rejected", out)
+        self.assertIn("3 findings", out)
+
+    def test_warning_with_detail(self):
+        out = _format_verdict({
+            "policy_verdict": "warning",
+            "policy_detail": "2 findings, max MEDIUM",
+        })
+        self.assertIn("warning", out)
+        self.assertIn("2 findings", out)
+
+    def test_clean(self):
+        out = _format_verdict({"policy_verdict": "clean"})
+        self.assertIn("clean", out)
+        self.assertIn("green", out)
+
+    def test_allowed(self):
+        out = _format_verdict({"policy_verdict": "allowed"})
+        self.assertIn("allowed", out)
+        self.assertIn("cyan", out)
+
+    def test_unscanned(self):
+        out = _format_verdict({"policy_verdict": "unscanned"})
+        self.assertIn("unscanned", out)
+
+    def test_detail_not_shown_for_clean(self):
+        out = _format_verdict({
+            "policy_verdict": "clean",
+            "policy_detail": "scan clean",
+        })
+        self.assertNotIn("scan clean", out)
+
+    def test_unknown_verdict(self):
+        out = _format_verdict({"policy_verdict": "custom-thing"})
+        self.assertIn("custom-thing", out)
+
+
+class TestFormatScan(unittest.TestCase):
+
+    def test_no_scan(self):
+        self.assertEqual(_format_scan({}), "[dim]-[/dim]")
+
+    def test_clean_scan(self):
+        out = _format_scan({"scan_findings": 0, "scan_severity": "INFO"})
+        self.assertIn("clean", out)
+        self.assertIn("green", out)
+
+    def test_critical_findings(self):
+        out = _format_scan({"scan_findings": 3, "scan_severity": "CRITICAL"})
+        self.assertIn("3", out)
+        self.assertIn("CRITICAL", out)
+        self.assertIn("bold red", out)
+
+    def test_high_findings(self):
+        out = _format_scan({"scan_findings": 1, "scan_severity": "HIGH"})
+        self.assertIn("1", out)
+        self.assertIn("HIGH", out)
+        self.assertIn("red", out)
+
+    def test_medium_findings(self):
+        out = _format_scan({"scan_findings": 5, "scan_severity": "MEDIUM"})
+        self.assertIn("5", out)
+        self.assertIn("MEDIUM", out)
+        self.assertIn("yellow", out)
+
+    def test_low_findings(self):
+        out = _format_scan({"scan_findings": 2, "scan_severity": "LOW"})
+        self.assertIn("2", out)
+        self.assertIn("LOW", out)
+        self.assertIn("cyan", out)
+
+    def test_info_findings(self):
+        out = _format_scan({"scan_findings": 1, "scan_severity": "INFO"})
+        self.assertIn("1", out)
+        self.assertIn("INFO", out)
+        self.assertIn("dim", out)
+
+    def test_none_findings_key_absent(self):
+        self.assertEqual(_format_scan({"scan_severity": "HIGH"}), "[dim]-[/dim]")
+
+
+class TestScanDetailSuffix(unittest.TestCase):
+
+    def test_none(self):
+        self.assertEqual(_scan_detail_suffix(None), "")
+
+    def test_zero_scanned(self):
+        self.assertEqual(_scan_detail_suffix({"scanned": 0, "total_findings": 0}), "")
+
+    def test_scanned_no_findings(self):
+        result = _scan_detail_suffix({"scanned": 5, "total_findings": 0, "unscanned": 3})
+        self.assertIn("5 scanned", result)
+        self.assertNotIn("findings", result)
+        self.assertTrue(result.startswith(" · "))
+
+    def test_scanned_with_findings(self):
+        result = _scan_detail_suffix({"scanned": 10, "total_findings": 7, "unscanned": 2})
+        self.assertIn("10 scanned", result)
+        self.assertIn("7 findings", result)
+
+    def test_empty_dict(self):
+        self.assertEqual(_scan_detail_suffix({}), "")
+
+
+class TestPolicyDetailSuffix(unittest.TestCase):
+
+    def test_none(self):
+        self.assertEqual(_policy_detail_suffix(None), "")
+
+    def test_empty_dict(self):
+        self.assertEqual(_policy_detail_suffix({}), "")
+
+    def test_all_zeros(self):
+        counts = {"blocked": 0, "rejected": 0, "warning": 0, "clean": 0, "unscanned": 0}
+        self.assertEqual(_policy_detail_suffix(counts), "")
+
+    def test_mixed_counts(self):
+        counts = {"blocked": 2, "rejected": 1, "warning": 0, "clean": 5, "unscanned": 10}
+        result = _policy_detail_suffix(counts)
+        self.assertIn("2 blocked", result)
+        self.assertIn("1 rejected", result)
+        self.assertNotIn("warning", result)
+        self.assertIn("5 clean", result)
+        self.assertIn("10 unscanned", result)
+        self.assertTrue(result.startswith(" · "))
+
+    def test_only_unscanned(self):
+        result = _policy_detail_suffix({"unscanned": 50})
+        self.assertIn("50 unscanned", result)
+
+    def test_order_blocked_before_clean(self):
+        counts = {"blocked": 1, "clean": 3}
+        result = _policy_detail_suffix(counts)
+        self.assertLess(result.index("blocked"), result.index("clean"))
+
+
+# ---------------------------------------------------------------------------
+# Policy enrichment — enrich_with_policy end-to-end
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
+    """End-to-end test: populate store, build inventory, enrich, verify."""
+
+    def _make_inventory(self):
+        return {
+            "skills": [
+                {"id": "github", "eligible": True, "source": "bundled"},
+                {"id": "discord", "eligible": False, "source": "bundled"},
+                {"id": "weather", "eligible": True, "source": "bundled"},
+                {"id": "new-skill", "eligible": True, "source": "user"},
+                {"id": "peekaboo", "eligible": False, "source": "bundled"},
+            ],
+            "plugins": [
+                {"id": "memory-core", "enabled": True},
+                {"id": "defenseclaw", "enabled": True},
+                {"id": "web-search", "enabled": False},
+            ],
+            "mcp": [
+                {"id": "local-db", "transport": "stdio"},
+            ],
+            "summary": {
+                "skills": {"count": 5},
+                "plugins": {"count": 3},
+                "mcp": {"count": 1},
+            },
+        }
+
+    def _seed_store(self):
+        import uuid
+        from datetime import datetime, timezone, timedelta
+        pe = self._pe()
+        now = datetime.now(timezone.utc)
+
+        pe.allow("skill", "github", "approved")
+        pe.block("skill", "discord", "excessive permissions")
+
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/skills/weather",
+            now, 500, 0, "INFO", "{}",
+        )
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "skill-scanner", "/skills/peekaboo",
+            now, 1000, 3, "HIGH", "{}",
+        )
+
+        pe.block("plugin", "defenseclaw", "self-ref")
+        pe.allow("plugin", "memory-core", "core")
+
+        self.store.insert_scan_result(
+            str(uuid.uuid4()), "plugin-scanner", "/plugins/web-search",
+            now, 300, 1, "MEDIUM", "{}",
+        )
+
+        pe.allow("mcp", "local-db", "internal use")
+
+    def test_skills_enriched(self):
+        self._seed_store()
+        inv = self._make_inventory()
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        by_id = {s["id"]: s for s in inv["skills"]}
+        self.assertEqual(by_id["github"]["policy_verdict"], "allowed")
+        self.assertEqual(by_id["discord"]["policy_verdict"], "blocked")
+        self.assertEqual(by_id["weather"]["policy_verdict"], "clean")
+        self.assertEqual(by_id["new-skill"]["policy_verdict"], "unscanned")
+        self.assertEqual(by_id["peekaboo"]["policy_verdict"], "rejected")
+
+    def test_scan_data_attached_to_items(self):
+        self._seed_store()
+        inv = self._make_inventory()
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        by_id = {s["id"]: s for s in inv["skills"]}
+        self.assertEqual(by_id["weather"]["scan_findings"], 0)
+        self.assertEqual(by_id["weather"]["scan_severity"], "INFO")
+        self.assertEqual(by_id["peekaboo"]["scan_findings"], 3)
+        self.assertEqual(by_id["peekaboo"]["scan_severity"], "HIGH")
+        self.assertNotIn("scan_findings", by_id["github"])
+        self.assertNotIn("scan_findings", by_id["new-skill"])
+
+    def test_scan_data_on_plugins(self):
+        self._seed_store()
+        inv = self._make_inventory()
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        by_id = {p["id"]: p for p in inv["plugins"]}
+        self.assertEqual(by_id["web-search"]["scan_findings"], 1)
+        self.assertEqual(by_id["web-search"]["scan_severity"], "MEDIUM")
+        self.assertNotIn("scan_findings", by_id["defenseclaw"])
+
+    def test_plugins_enriched(self):
+        self._seed_store()
+        inv = self._make_inventory()
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        by_id = {p["id"]: p for p in inv["plugins"]}
+        self.assertEqual(by_id["defenseclaw"]["policy_verdict"], "blocked")
+        self.assertEqual(by_id["memory-core"]["policy_verdict"], "allowed")
+        self.assertEqual(by_id["web-search"]["policy_verdict"], "warning")
+
+    def test_mcp_enriched(self):
+        self._seed_store()
+        inv = self._make_inventory()
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        self.assertEqual(inv["mcp"][0]["policy_verdict"], "allowed")
+
+    def test_summary_policy_counts(self):
+        self._seed_store()
+        inv = self._make_inventory()
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        ps = inv["summary"]["policy_skills"]
+        self.assertEqual(ps["blocked"], 1)
+        self.assertEqual(ps["allowed"], 1)
+        self.assertEqual(ps["clean"], 1)
+        self.assertEqual(ps["rejected"], 1)
+        self.assertEqual(ps["unscanned"], 1)
+
+        pp = inv["summary"]["policy_plugins"]
+        self.assertEqual(pp["blocked"], 1)
+        self.assertEqual(pp["allowed"], 1)
+        self.assertEqual(pp["warning"], 1)
+
+        pm = inv["summary"]["policy_mcp"]
+        self.assertEqual(pm["allowed"], 1)
+
+    def test_summary_scan_counts(self):
+        self._seed_store()
+        inv = self._make_inventory()
+        enrich_with_policy(inv, self.store, self.skill_actions)
+
+        ss = inv["summary"]["scan_skills"]
+        self.assertEqual(ss["scanned"], 2)
+        self.assertEqual(ss["unscanned"], 3)
+        self.assertEqual(ss["total_findings"], 3)
+
+        sp = inv["summary"]["scan_plugins"]
+        self.assertEqual(sp["scanned"], 1)
+        self.assertEqual(sp["unscanned"], 2)
+        self.assertEqual(sp["total_findings"], 1)
+
+        sm = inv["summary"]["scan_mcp"]
+        self.assertEqual(sm["scanned"], 0)
+        self.assertEqual(sm["unscanned"], 1)
+
+    def test_no_store_is_noop(self):
+        inv = self._make_inventory()
+        enrich_with_policy(inv, None, self.skill_actions)
+        self.assertNotIn("policy_verdict", inv["skills"][0])
+
+    def test_empty_skills_list(self):
+        inv = {"skills": [], "plugins": [], "mcp": [], "summary": {}}
+        enrich_with_policy(inv, self.store, self.skill_actions)
+        self.assertNotIn("policy_skills", inv["summary"])
+
+    def test_items_without_id_are_skipped(self):
+        inv = {
+            "skills": [{"eligible": True}],
+            "plugins": [],
+            "mcp": [],
+            "summary": {"skills": {"count": 1}},
+        }
+        enrich_with_policy(inv, self.store, self.skill_actions)
+        self.assertNotIn("policy_verdict", inv["skills"][0])
+
+
+# ---------------------------------------------------------------------------
+# Policy enrichment — CLI integration with policy data
+# ---------------------------------------------------------------------------
+
+
+class TestCLIIntegrationWithPolicy(unittest.TestCase):
+    """aibom scan CLI command includes policy data in JSON output."""
+
+    def setUp(self) -> None:
+        from tests.helpers import make_app_context
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self) -> None:
+        from tests.helpers import cleanup_app
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _seed(self):
+        """Seed store with policy data matching SKILLS_JSON/PLUGINS_JSON fixtures.
+
+        Fixture skills: github, weather.  Plugins: anthropic, memory-core.
+        MCP: filesystem.
+        """
+        import uuid
+        from datetime import datetime, timezone
+        from defenseclaw.enforce import PolicyEngine
+        pe = PolicyEngine(self.app.store)
+        now = datetime.now(timezone.utc)
+
+        pe.block("skill", "weather", "missing weather-cli binary")
+        pe.allow("skill", "github", "security team approved")
+
+        self.app.store.insert_scan_result(
+            str(uuid.uuid4()), "plugin-scanner", "/plugins/anthropic",
+            now, 100, 0, "INFO", "{}",
+        )
+        pe.block("plugin", "memory-core", "test block")
+
+        pe.allow("mcp", "filesystem", "internal use")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_json_output_includes_policy_verdicts(self, _):
+        self._seed()
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+
+        for skill in data["skills"]:
+            self.assertIn("policy_verdict", skill)
+
+        by_id = {s["id"]: s for s in data["skills"]}
+        self.assertEqual(by_id["github"]["policy_verdict"], "allowed")
+        self.assertEqual(by_id["weather"]["policy_verdict"], "blocked")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_json_plugins_have_verdicts(self, _):
+        self._seed()
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+
+        by_id = {p["id"]: p for p in data["plugins"]}
+        self.assertEqual(by_id["anthropic"]["policy_verdict"], "clean")
+        self.assertEqual(by_id["memory-core"]["policy_verdict"], "blocked")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_json_mcp_has_verdicts(self, _):
+        self._seed()
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["mcp"][0]["policy_verdict"], "allowed")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_summary_has_policy_counts(self, _):
+        self._seed()
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertIn("policy_skills", data["summary"])
+        self.assertIn("policy_plugins", data["summary"])
+        self.assertIn("policy_mcp", data["summary"])
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_json_includes_scan_data(self, _):
+        self._seed()
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+
+        by_id = {p["id"]: p for p in data["plugins"]}
+        self.assertEqual(by_id["anthropic"]["scan_findings"], 0)
+        self.assertEqual(by_id["anthropic"]["scan_severity"], "INFO")
+        self.assertNotIn("scan_findings", by_id["memory-core"])
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_summary_has_scan_counts(self, _):
+        self._seed()
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan", "--json"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.stdout)
+        self.assertIn("scan_skills", data["summary"])
+        self.assertIn("scan_plugins", data["summary"])
+        self.assertIn("scan_mcp", data["summary"])
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run", side_effect=_mock_run)
+    def test_human_output_renders_policy_column(self, _):
+        self._seed()
+        from defenseclaw.commands.cmd_aibom import aibom
+        runner = CliRunner()
+        result = runner.invoke(aibom, ["scan"], obj=self.app)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Policy", result.output)
+        self.assertIn("blocked", result.output)
+        self.assertIn("allowed", result.output)
+
+
+# ---------------------------------------------------------------------------
+# _run_openclaw — additional raw_decode edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestRunOpenclawRawDecodeEdge(unittest.TestCase):
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_stdout_with_leading_noise(self, mock_sub):
+        """Leading noise on stdout (not just stderr) should still parse."""
+        noise = "Some debug output\n"
+        json_part = '{"agents": [{"id": "main"}]}'
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout=noise + json_part,
+            stderr="",
+        )
+        result = _run_openclaw("agents", "list")
+        self.assertIsNotNone(result.data)
+        self.assertEqual(result.data["agents"][0]["id"], "main")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_array_root_json_in_noise(self, mock_sub):
+        """Array-root JSON embedded in stderr noise should parse."""
+        warning = "(node:123) Warning: something\n"
+        json_part = '[{"name": "test-tool"}]'
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr=warning + json_part,
+        )
+        result = _run_openclaw("tools", "list")
+        self.assertIsNotNone(result.data)
+        self.assertEqual(result.data[0]["name"], "test-tool")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_bracket_but_invalid_json(self, mock_sub):
+        """A { character in non-JSON text shouldn't crash."""
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout="Error: something went wrong {see log}",
+            stderr="",
+        )
+        result = _run_openclaw("agents", "list")
+        self.assertIsNone(result.data)
+        self.assertEqual(result.error, "no JSON in output")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_trailing_noise_on_stdout(self, mock_sub):
+        """JSON followed by garbage on stdout should parse via raw_decode."""
+        json_part = '{"models": []}'
+        noise = "\n=== some debug footer ==="
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout=json_part + noise,
+            stderr="",
+        )
+        result = _run_openclaw("models", "status")
+        self.assertIsNotNone(result.data)
+        self.assertEqual(result.data["models"], [])
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_both_streams_have_noise_only(self, mock_sub):
+        """When both stdout and stderr have non-JSON text, return error."""
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout="debug line 1\ndebug line 2",
+            stderr="warning: something",
+        )
+        result = _run_openclaw("skills", "list")
+        self.assertIsNone(result.data)
+        self.assertEqual(result.error, "no JSON in output")
+
+    @patch("defenseclaw.inventory.claw_inventory.subprocess.run")
+    def test_noise_surrounding_json(self, mock_sub):
+        """Leading AND trailing noise around JSON should parse."""
+        text = '(node:1) Warning: x\n{"ok": true}\n(node:1) ExperimentalWarning: y'
+        mock_sub.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr=text,
+        )
+        result = _run_openclaw("agents", "list")
+        self.assertIsNotNone(result.data)
+        self.assertTrue(result.data["ok"])
 
 
 if __name__ == "__main__":

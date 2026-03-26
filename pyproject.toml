@@ -11,7 +11,8 @@ dependencies = [
     "requests>=2.33",
     "rich>=13.0",
     "cisco-ai-skill-scanner>=2.0",
-    "cisco-ai-mcp-scanner>=1.0; python_version>='3.11'",
+    "cisco-ai-mcp-scanner>=4.0; python_version>='3.11'",
+    "litellm==1.80.16",
 ]
 
 [project.optional-dependencies]

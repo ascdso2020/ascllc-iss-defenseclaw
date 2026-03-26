@@ -65,14 +65,14 @@ class SkillScannerWrapper:
             build_kwargs["use_llm"] = True
             if cfg.llm_model:
                 build_kwargs["llm_model"] = cfg.llm_model
+            if cfg.llm_provider:
+                build_kwargs["llm_provider"] = cfg.llm_provider
             if cfg.llm_api_key:
                 build_kwargs["llm_api_key"] = cfg.llm_api_key
             elif os.environ.get("SKILL_SCANNER_LLM_API_KEY"):
                 build_kwargs["llm_api_key"] = os.environ["SKILL_SCANNER_LLM_API_KEY"]
             if cfg.llm_consensus_runs > 0:
                 build_kwargs["llm_consensus_runs"] = cfg.llm_consensus_runs
-        if cfg.enable_meta:
-            build_kwargs["enable_meta"] = True
         if cfg.use_trigger:
             build_kwargs["use_trigger"] = True
         if cfg.use_virustotal:
