@@ -643,7 +643,15 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
         click.secho("  Verdict:  CLEAN", fg="green")
     else:
         color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(max_sev, "white")
-        click.secho(f"  Verdict:  {max_sev} ({len(findings)} findings)", fg=color)
+        sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        counts = {}
+        for f in findings:
+            s = f.get("severity") or f.get("Severity") or "INFO"
+            counts[s] = counts.get(s, 0) + 1
+        breakdown = ", ".join(
+            f"{counts[s]} {s.lower()}" for s in sev_order if s in counts
+        )
+        click.secho(f"  Verdict:  {max_sev} ({breakdown})", fg=color)
         click.echo()
         for f in findings:
             sev = f.get("severity") or f.get("Severity") or "INFO"
@@ -935,7 +943,14 @@ def _print_result(name: str, result) -> None:
     else:
         sev = result.max_severity()
         color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(sev, "white")
-        click.secho(f"  Verdict:  {sev} ({len(result.findings)} findings)", fg=color)
+        sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+        counts = {}
+        for f in result.findings:
+            counts[f.severity] = counts.get(f.severity, 0) + 1
+        breakdown = ", ".join(
+            f"{counts[s]} {s.lower()}" for s in sev_order if s in counts
+        )
+        click.secho(f"  Verdict:  {sev} ({breakdown})", fg=color)
         click.echo()
         for f in result.findings:
             sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")

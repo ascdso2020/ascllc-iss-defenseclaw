@@ -669,5 +669,107 @@ class TestSkillScanURL(SkillCommandTestBase):
         mock_scanner.scan.assert_called_once()
 
 
+class TestVerdictBreakdown(SkillCommandTestBase):
+    """Verdict line shows per-severity counts, not the total finding count."""
+
+    def _scan_result(self, skill_dir, findings):
+        return ScanResult(
+            scanner="skill-scanner",
+            target=skill_dir,
+            timestamp=datetime.now(timezone.utc),
+            findings=findings,
+            duration=timedelta(seconds=0.2),
+        )
+
+    def _finding(self, severity, title="finding"):
+        return Finding(
+            id=str(uuid.uuid4()), severity=severity, title=title,
+            scanner="skill-scanner",
+        )
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_verdict_shows_breakdown_not_total(self, mock_cls, _mock_info):
+        """Mixed severities: verdict label is max severity with per-severity counts."""
+        skill_dir = os.path.join(self.tmp_dir, "mixed-skill")
+        os.makedirs(skill_dir)
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._scan_result(skill_dir, [
+            self._finding("CRITICAL", "Token leak"),
+            self._finding("HIGH", "Shell exec"),
+            self._finding("MEDIUM", "Code exec A"),
+            self._finding("MEDIUM", "Code exec B"),
+            self._finding("INFO", "No license"),
+        ])
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "mixed-skill", "--path", skill_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("CRITICAL", result.output)
+        self.assertIn("1 critical", result.output)
+        self.assertIn("1 high", result.output)
+        self.assertIn("2 medium", result.output)
+        self.assertIn("1 info", result.output)
+        # Must NOT show raw total "5 findings"
+        self.assertNotIn("5 findings", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_verdict_single_severity(self, mock_cls, _mock_info):
+        """Only one severity present — shows just that count."""
+        skill_dir = os.path.join(self.tmp_dir, "high-only")
+        os.makedirs(skill_dir)
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._scan_result(skill_dir, [
+            self._finding("HIGH", "Issue A"),
+            self._finding("HIGH", "Issue B"),
+            self._finding("HIGH", "Issue C"),
+        ])
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "high-only", "--path", skill_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("HIGH", result.output)
+        self.assertIn("3 high", result.output)
+        self.assertNotIn("critical", result.output)
+        self.assertNotIn("medium", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_verdict_label_is_max_severity(self, mock_cls, _mock_info):
+        """Verdict label reflects worst severity even when it has only 1 finding."""
+        skill_dir = os.path.join(self.tmp_dir, "one-critical")
+        os.makedirs(skill_dir)
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._scan_result(skill_dir, [
+            self._finding("CRITICAL", "Token leaked"),
+            self._finding("MEDIUM", "Risky call"),
+            self._finding("MEDIUM", "Risky call 2"),
+        ])
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "one-critical", "--path", skill_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Label should be CRITICAL (worst), not MEDIUM (most common)
+        self.assertIn("CRITICAL", result.output)
+        self.assertIn("1 critical", result.output)
+        self.assertIn("2 medium", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_verdict_clean_unchanged(self, mock_cls, _mock_info):
+        """No findings still shows CLEAN — breakdown logic doesn't affect clean path."""
+        skill_dir = os.path.join(self.tmp_dir, "clean-skill2")
+        os.makedirs(skill_dir)
+        mock_scanner = MagicMock()
+        mock_scanner.scan.return_value = self._scan_result(skill_dir, [])
+        mock_cls.return_value = mock_scanner
+
+        result = self.invoke(["scan", "clean-skill2", "--path", skill_dir])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("CLEAN", result.output)
+        self.assertNotIn("findings", result.output)
+
+
 if __name__ == "__main__":
     unittest.main()
