@@ -113,29 +113,25 @@ class TestAlertsCommand(unittest.TestCase):
         else:
             os.environ["COLUMNS"] = self._orig_columns
 
+    # ------------------------------------------------------------------
+    # Helpers: existing tests updated to pass --no-tui (TUI is default)
+    # ------------------------------------------------------------------
+
     def test_alerts_empty(self):
         from defenseclaw.commands.cmd_alerts import alerts
-        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No alerts", result.output)
 
     def test_alerts_with_data(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
-        self.app.store.log_event(Event(
-            action="scan",
-            target="/skills/bad",
-            severity="HIGH",
-            details="found issues",
-        ))
-        self.app.store.log_event(Event(
-            action="scan",
-            target="/skills/worse",
-            severity="CRITICAL",
-            details="major vulnerability",
-        ))
+        self.app.store.log_event(Event(action="scan", target="/skills/bad",
+                                       severity="HIGH", details="found issues"))
+        self.app.store.log_event(Event(action="scan", target="/skills/worse",
+                                       severity="CRITICAL", details="major vulnerability"))
 
-        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
         self.assertIn("HIGH", result.output)
@@ -145,23 +141,182 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
 
         for i in range(5):
-            self.app.store.log_event(Event(
-                action="scan",
-                target=f"/skills/s{i}",
-                severity="MEDIUM",
-                details=f"issue {i}",
-            ))
+            self.app.store.log_event(Event(action="scan", target=f"/skills/s{i}",
+                                           severity="MEDIUM", details=f"issue {i}"))
 
-        result = self.runner.invoke(alerts, ["-n", "2"], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, ["--no-tui", "-n", "2"], obj=self.app,
+                                    catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Security Alerts", result.output)
 
     def test_alerts_no_store(self):
         from defenseclaw.commands.cmd_alerts import alerts
         self.app.store = None
-        result = self.runner.invoke(alerts, [], obj=self.app, catch_exceptions=False)
+        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No audit store", result.output)
+
+    # ------------------------------------------------------------------
+    # --show N: non-interactive single-alert detail
+    # ------------------------------------------------------------------
+
+    def test_alerts_show_prints_full_detail(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        self.app.store.log_event(Event(action="scan", target="/skills/bad",
+                                       severity="HIGH",
+                                       details="scanner=skill-scanner findings=2 max_severity=HIGH"))
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--show", "1"], obj=self.app,
+                                    catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Alert #1", result.output)
+        self.assertIn("HIGH", result.output)
+        self.assertIn("/skills/bad", result.output)
+
+    def test_alerts_show_out_of_range(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+
+        self.app.store.log_event(Event(action="scan", target="/skills/x",
+                                       severity="LOW", details="scanner=skill-scanner findings=0"))
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--show", "99"], obj=self.app,
+                                    catch_exceptions=True)
+        self.assertNotEqual(result.exit_code, 0)
+
+    # ------------------------------------------------------------------
+    # Helper functions
+    # ------------------------------------------------------------------
+
+    def test_trunc_path_short_returns_unchanged(self):
+        from defenseclaw.commands.cmd_alerts import _trunc_path
+        self.assertEqual(_trunc_path("/skills/foo", 20), "/skills/foo")
+
+    def test_trunc_path_shows_tail(self):
+        from defenseclaw.commands.cmd_alerts import _trunc_path
+        result = _trunc_path("/Users/nikhil/.openclaw/workspace/skills/codeguard", 20)
+        self.assertIn("codeguard", result)
+        self.assertTrue(result.startswith("…"))
+
+    def test_trunc_path_two_components_when_one_fits(self):
+        from defenseclaw.commands.cmd_alerts import _trunc_path
+        # "…/skills/codeguard" = 19 chars; fits in 20 but full path is 34 chars
+        result = _trunc_path("/home/user/workspace/skills/codeguard", 20)
+        # "codeguard" (9+2=11) fits first; "skills/codeguard" (16+2=18) also fits
+        # function returns smallest suffix that fits → "…/codeguard"
+        self.assertTrue(result.startswith("…/"))
+        self.assertIn("codeguard", result)
+        self.assertLessEqual(len(result), 20)
+
+    def test_humanize_details_port_only(self):
+        from defenseclaw.commands.cmd_alerts import _humanize_details
+        self.assertEqual(_humanize_details("port=4000"), ":4000")
+
+    def test_humanize_details_host_and_port(self):
+        from defenseclaw.commands.cmd_alerts import _humanize_details
+        self.assertEqual(_humanize_details("host=127.0.0.1 port=18789"), "127.0.0.1:18789")
+
+    def test_humanize_details_mode(self):
+        from defenseclaw.commands.cmd_alerts import _humanize_details
+        self.assertIn("observe", _humanize_details("mode=observe port=4000"))
+
+    def test_humanize_details_plain_text_unchanged(self):
+        from defenseclaw.commands.cmd_alerts import _humanize_details
+        self.assertEqual(_humanize_details("starting all subsystems"), "starting all subsystems")
+
+    def test_humanize_details_strips_scanner_and_severity(self):
+        from defenseclaw.commands.cmd_alerts import _humanize_details
+        result = _humanize_details("scanner=skill-scanner findings=19 max_severity=CRITICAL duration=0.28")
+        self.assertNotIn("scanner", result)
+        self.assertNotIn("max_severity", result)
+        self.assertNotIn("findings", result)
+        self.assertIn("duration", result)
+
+    def test_findings_json_fits_all(self):
+        from defenseclaw.commands.cmd_alerts import _findings_json
+        findings = [{"severity": "HIGH", "title": "Shell exec"}]
+        result = _findings_json(findings, 200)
+        data = json.loads(result)
+        self.assertEqual(data[0]["severity"], "HIGH")
+        self.assertEqual(data[0]["title"], "Shell exec")
+
+    def test_findings_json_truncates_with_ellipsis(self):
+        from defenseclaw.commands.cmd_alerts import _findings_json
+        findings = [
+            {"severity": "CRITICAL", "title": "GitHub token detected"},
+            {"severity": "HIGH",     "title": "Shell command execution"},
+            {"severity": "MEDIUM",   "title": "Code execution"},
+        ]
+        result = _findings_json(findings, 50)
+        self.assertTrue(result.endswith("…") or result.startswith("["))
+        self.assertLessEqual(len(result), 50)
+
+    # ------------------------------------------------------------------
+    # DB: get_findings_for_target / get_severity_counts_for_target
+    # ------------------------------------------------------------------
+
+    def _insert_scan_with_findings(self, target, scanner, findings):
+        """Helper: insert a scan_result and its findings into the store."""
+        import uuid
+        from datetime import timedelta
+        scan_id = str(uuid.uuid4())
+        max_sev = findings[0]["severity"] if findings else "INFO"
+        self.app.store.insert_scan_result(
+            scan_id=scan_id, scanner=scanner, target=target,
+            ts=datetime.now(timezone.utc), duration_ms=100,
+            finding_count=len(findings), max_severity=max_sev, raw_json="{}",
+        )
+        for f in findings:
+            self.app.store.insert_finding(
+                finding_id=str(uuid.uuid4()), scan_id=scan_id,
+                severity=f["severity"], title=f["title"],
+                description="", location=f.get("location", ""),
+                remediation="", scanner=scanner, tags="",
+            )
+        return scan_id
+
+    def test_get_findings_for_target_returns_findings(self):
+        self._insert_scan_with_findings(
+            "/skills/test", "skill-scanner",
+            [{"severity": "CRITICAL", "title": "Token leak", "location": "main.py:5"},
+             {"severity": "MEDIUM",   "title": "Code exec",  "location": ""}],
+        )
+        results = self.app.store.get_findings_for_target("/skills/test", "skill-scanner")
+        self.assertEqual(len(results), 2)
+        # ordered by severity: CRITICAL first
+        self.assertEqual(results[0]["severity"], "CRITICAL")
+        self.assertEqual(results[0]["title"], "Token leak")
+
+    def test_get_findings_for_target_only_latest_scan(self):
+        """When two scans exist for the same target, only latest scan's findings returned."""
+        self._insert_scan_with_findings("/skills/x", "skill-scanner",
+                                        [{"severity": "HIGH", "title": "Old finding"}])
+        self._insert_scan_with_findings("/skills/x", "skill-scanner",
+                                        [{"severity": "LOW", "title": "New finding"}])
+        results = self.app.store.get_findings_for_target("/skills/x", "skill-scanner")
+        titles = [r["title"] for r in results]
+        self.assertIn("New finding", titles)
+        self.assertNotIn("Old finding", titles)
+
+    def test_get_findings_for_target_empty(self):
+        results = self.app.store.get_findings_for_target("/nonexistent", "skill-scanner")
+        self.assertEqual(results, [])
+
+    def test_get_severity_counts_for_target(self):
+        self._insert_scan_with_findings(
+            "/skills/count", "skill-scanner",
+            [{"severity": "CRITICAL", "title": "A"},
+             {"severity": "MEDIUM",   "title": "B"},
+             {"severity": "MEDIUM",   "title": "C"}],
+        )
+        counts = self.app.store.get_severity_counts_for_target("/skills/count", "skill-scanner")
+        self.assertEqual(counts["CRITICAL"], 1)
+        self.assertEqual(counts["MEDIUM"], 2)
+        self.assertNotIn("HIGH", counts)
+
+    def test_get_severity_counts_empty(self):
+        counts = self.app.store.get_severity_counts_for_target("/nothing", "skill-scanner")
+        self.assertEqual(counts, {})
 
 
 # ---------------------------------------------------------------------------

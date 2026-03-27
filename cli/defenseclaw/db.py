@@ -243,6 +243,47 @@ class Store:
             })
         return results
 
+    def get_severity_counts_for_target(
+        self, target: str, scanner: str,
+    ) -> dict[str, int]:
+        """Return {severity: count} from the most recent scan for target+scanner."""
+        cur = self.db.execute(
+            """SELECT f.severity, COUNT(*) as cnt
+               FROM findings f
+               INNER JOIN scan_results sr ON f.scan_id = sr.id
+               WHERE sr.id = (
+                   SELECT id FROM scan_results
+                   WHERE target = ? AND scanner = ?
+                   ORDER BY timestamp DESC LIMIT 1
+               )
+               GROUP BY f.severity""",
+            (target, scanner),
+        )
+        return {row[0]: row[1] for row in cur.fetchall()}
+
+    def get_findings_for_target(
+        self, target: str, scanner: str,
+    ) -> list[dict[str, Any]]:
+        """Return findings from the most recent scan for target+scanner."""
+        cur = self.db.execute(
+            """SELECT f.severity, f.title, f.location
+               FROM findings f
+               INNER JOIN scan_results sr ON f.scan_id = sr.id
+               WHERE sr.id = (
+                   SELECT id FROM scan_results
+                   WHERE target = ? AND scanner = ?
+                   ORDER BY timestamp DESC LIMIT 1
+               )
+               ORDER BY CASE f.severity
+                   WHEN 'CRITICAL' THEN 1 WHEN 'HIGH' THEN 2
+                   WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END""",
+            (target, scanner),
+        )
+        return [
+            {"severity": r[0], "title": r[1], "location": r[2] or ""}
+            for r in cur.fetchall()
+        ]
+
     # -- Actions --
 
     def set_action(
