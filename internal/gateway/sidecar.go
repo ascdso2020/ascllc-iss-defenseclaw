@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -106,6 +107,15 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			errCh <- err
 		}
 	}()
+
+	// Report telemetry (OTel) health — not a goroutine, just state
+	s.reportTelemetryHealth()
+	if s.otel != nil {
+		s.otel.EmitStartupSpan(ctx)
+	}
+
+	// Report Splunk HEC health — not a goroutine, just state
+	s.reportSplunkHealth()
 
 	// Wait for context cancellation (signal handler in CLI layer)
 	<-ctx.Done()
@@ -237,6 +247,9 @@ func (s *Sidecar) runWatcher(ctx context.Context) error {
 	w := watcher.New(s.cfg, skillDirs, pluginDirs, s.store, s.logger, s.shell, opa, func(r watcher.AdmissionResult) {
 		s.handleAdmissionResult(r)
 	})
+	if s.otel != nil {
+		w.SetOTelProvider(s.otel)
+	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] watcher starting (%d skill dirs, %d plugin dirs, skill_take_action=%v, plugin_take_action=%v)\n",
 		len(skillDirs), len(pluginDirs), wcfg.Skill.TakeAction, wcfg.Plugin.TakeAction)
@@ -346,13 +359,30 @@ func (s *Sidecar) subscribeToSessions(ctx context.Context) {
 		return
 	}
 
-	var sessions []struct {
+	// OpenClaw returns sessions as either an array or an object keyed by
+	// session ID. Try both formats.
+	type sessionEntry struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
+	var sessions []sessionEntry
+
 	if err := json.Unmarshal(raw, &sessions); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar] parse sessions list: %v\n", err)
-		return
+		// Try object format: {"sessionId": {id, name, ...}, ...}
+		var sessMap map[string]json.RawMessage
+		if err2 := json.Unmarshal(raw, &sessMap); err2 != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] parse sessions list: %v\n", err)
+			return
+		}
+		for k, v := range sessMap {
+			var entry sessionEntry
+			if json.Unmarshal(v, &entry) == nil {
+				if entry.ID == "" {
+					entry.ID = k
+				}
+				sessions = append(sessions, entry)
+			}
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[sidecar] found %d active sessions, subscribing for tool events...\n", len(sessions))
@@ -374,6 +404,102 @@ func (s *Sidecar) logHello(h *HelloOK) {
 		fmt.Fprintf(os.Stderr, "[sidecar] methods: %s\n", strings.Join(h.Features.Methods, ", "))
 		fmt.Fprintf(os.Stderr, "[sidecar] events:  %s\n", strings.Join(h.Features.Events, ", "))
 	}
+}
+
+// reportTelemetryHealth sets the OTel telemetry subsystem health based on
+// whether the provider was initialized and which signals are active.
+func (s *Sidecar) reportTelemetryHealth() {
+	if s.otel == nil || !s.otel.Enabled() {
+		s.health.SetTelemetry(StateDisabled, "", nil)
+		return
+	}
+
+	details := map[string]interface{}{}
+	if s.cfg.OTel.Endpoint != "" {
+		details["endpoint"] = s.cfg.OTel.Endpoint
+	}
+
+	var signals []string
+	if s.cfg.OTel.Traces.Enabled {
+		signals = append(signals, "traces")
+	}
+	if s.cfg.OTel.Metrics.Enabled {
+		signals = append(signals, "metrics")
+	}
+	if s.cfg.OTel.Logs.Enabled {
+		signals = append(signals, "logs")
+	}
+	if len(signals) > 0 {
+		details["signals"] = strings.Join(signals, ", ")
+	}
+
+	if ep := s.cfg.OTel.Traces.Endpoint; ep != "" {
+		details["traces_endpoint"] = ep
+	}
+
+	s.health.SetTelemetry(StateRunning, "", details)
+}
+
+// reportSplunkHealth sets the Splunk HEC subsystem health based on config.
+func (s *Sidecar) reportSplunkHealth() {
+	if !s.cfg.Splunk.Enabled {
+		s.health.SetSplunk(StateDisabled, "", nil)
+		return
+	}
+
+	details := map[string]interface{}{
+		"hec_endpoint": s.cfg.Splunk.HECEndpoint,
+		"index":        s.cfg.Splunk.Index,
+	}
+
+	bridgeEnv := readDotEnvFile(filepath.Join(s.cfg.DataDir, "splunk-bridge", "env"))
+	if bridgeEnv == nil {
+		bridgeEnv = readDotEnvFile(s.cfg.DataDir)
+	}
+	if url := bridgeEnv["SPLUNK_PASSWORD"]; url != "" {
+		details["web_url"] = "http://127.0.0.1:8000"
+		details["web_user"] = "admin"
+		details["web_password"] = url
+	}
+	if user := bridgeEnv["DEFENSECLAW_LOCAL_USERNAME"]; user != "" {
+		details["username"] = user
+	}
+	if pass := bridgeEnv["DEFENSECLAW_LOCAL_PASSWORD"]; pass != "" {
+		details["password"] = pass
+	}
+
+	s.health.SetSplunk(StateRunning, "", details)
+}
+
+// readDotEnvFile reads KEY=VALUE pairs from the .env (or .env.example) file in dataDir.
+func readDotEnvFile(dataDir string) map[string]string {
+	path := filepath.Join(dataDir, ".env")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		path = filepath.Join(dataDir, ".env.example")
+		data, err = os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+	}
+	env := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		env[k] = v
+	}
+	return env
 }
 
 // Client returns the underlying gateway client for direct RPC calls.

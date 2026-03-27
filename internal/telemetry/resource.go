@@ -16,11 +16,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+func resolveServiceName(attrs map[string]string) string {
+	if v := os.Getenv("OTEL_SERVICE_NAME"); v != "" {
+		return v
+	}
+	if v, ok := attrs["service.name"]; ok && v != "" {
+		return v
+	}
+	return "defenseclaw"
+}
+
 func buildResource(cfg *config.Config, version string) *resource.Resource {
 	hostname, _ := os.Hostname()
+	serviceName := resolveServiceName(cfg.OTel.Resource.Attributes)
 
 	attrs := []attribute.KeyValue{
-		attribute.String("service.name", "defenseclaw"),
+		attribute.String("service.name", serviceName),
 		attribute.String("service.version", version),
 		attribute.String("service.namespace", "ai-governance"),
 		attribute.String("deployment.environment", cfg.Environment),
@@ -41,6 +52,9 @@ func buildResource(cfg *config.Config, version string) *resource.Resource {
 	}
 
 	for k, v := range cfg.OTel.Resource.Attributes {
+		if k == "service.name" {
+			continue
+		}
 		attrs = append(attrs, attribute.String(k, v))
 	}
 

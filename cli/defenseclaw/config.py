@@ -177,6 +177,66 @@ class SplunkConfig:
 
 
 @dataclass
+class OTelTLSConfig:
+    insecure: bool = False
+    ca_cert: str = ""
+
+
+@dataclass
+class OTelTracesConfig:
+    enabled: bool = True
+    sampler: str = "always_on"
+    sampler_arg: str = "1.0"
+    endpoint: str = ""
+    protocol: str = ""
+    url_path: str = ""
+
+
+@dataclass
+class OTelLogsConfig:
+    enabled: bool = True
+    emit_individual_findings: bool = False
+    endpoint: str = ""
+    protocol: str = ""
+    url_path: str = ""
+
+
+@dataclass
+class OTelMetricsConfig:
+    enabled: bool = True
+    export_interval_s: int = 60
+    endpoint: str = ""
+    protocol: str = ""
+    url_path: str = ""
+
+
+@dataclass
+class OTelBatchConfig:
+    max_export_batch_size: int = 512
+    scheduled_delay_ms: int = 5000
+    max_queue_size: int = 2048
+
+
+@dataclass
+class OTelResourceConfig:
+    attributes: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class OTelConfig:
+    enabled: bool = False
+    protocol: str = "grpc"
+    endpoint: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+    tls: OTelTLSConfig = field(default_factory=OTelTLSConfig)
+    traces: OTelTracesConfig = field(default_factory=OTelTracesConfig)
+    logs: OTelLogsConfig = field(default_factory=OTelLogsConfig)
+    metrics: OTelMetricsConfig = field(default_factory=OTelMetricsConfig)
+    batch: OTelBatchConfig = field(default_factory=OTelBatchConfig)
+    resource: OTelResourceConfig = field(default_factory=OTelResourceConfig)
+
+
+@dataclass
 class GatewayWatcherSkillConfig:
     enabled: bool = True
     take_action: bool = False
@@ -333,6 +393,7 @@ class Config:
     firewall: FirewallConfig = field(default_factory=FirewallConfig)
     guardrail: GuardrailConfig = field(default_factory=GuardrailConfig)
     splunk: SplunkConfig = field(default_factory=SplunkConfig)
+    otel: OTelConfig = field(default_factory=OTelConfig)
     gateway: GatewayConfig = field(default_factory=GatewayConfig)
     skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
@@ -605,6 +666,57 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
     return MCPScannerConfig()
 
 
+def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
+    if not raw:
+        return OTelConfig()
+    traces_raw = raw.get("traces", {})
+    logs_raw = raw.get("logs", {})
+    metrics_raw = raw.get("metrics", {})
+    batch_raw = raw.get("batch", {})
+    tls_raw = raw.get("tls", {})
+    resource_raw = raw.get("resource", {})
+    return OTelConfig(
+        enabled=raw.get("enabled", False),
+        protocol=raw.get("protocol", "grpc"),
+        endpoint=raw.get("endpoint", ""),
+        headers=raw.get("headers", {}),
+        tls=OTelTLSConfig(
+            insecure=tls_raw.get("insecure", False),
+            ca_cert=tls_raw.get("ca_cert", ""),
+        ),
+        traces=OTelTracesConfig(
+            enabled=traces_raw.get("enabled", True),
+            sampler=traces_raw.get("sampler", "always_on"),
+            sampler_arg=traces_raw.get("sampler_arg", "1.0"),
+            endpoint=traces_raw.get("endpoint", ""),
+            protocol=traces_raw.get("protocol", ""),
+            url_path=traces_raw.get("url_path", ""),
+        ),
+        logs=OTelLogsConfig(
+            enabled=logs_raw.get("enabled", True),
+            emit_individual_findings=logs_raw.get("emit_individual_findings", False),
+            endpoint=logs_raw.get("endpoint", ""),
+            protocol=logs_raw.get("protocol", ""),
+            url_path=logs_raw.get("url_path", ""),
+        ),
+        metrics=OTelMetricsConfig(
+            enabled=metrics_raw.get("enabled", True),
+            export_interval_s=metrics_raw.get("export_interval_s", 60),
+            endpoint=metrics_raw.get("endpoint", ""),
+            protocol=metrics_raw.get("protocol", ""),
+            url_path=metrics_raw.get("url_path", ""),
+        ),
+        batch=OTelBatchConfig(
+            max_export_batch_size=batch_raw.get("max_export_batch_size", 512),
+            scheduled_delay_ms=batch_raw.get("scheduled_delay_ms", 5000),
+            max_queue_size=batch_raw.get("max_queue_size", 2048),
+        ),
+        resource=OTelResourceConfig(
+            attributes=resource_raw.get("attributes", {}),
+        ),
+    )
+
+
 def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
     if not raw:
         return GatewayWatcherConfig()
@@ -698,6 +810,7 @@ def load() -> Config:
             batch_size=splunk_raw.get("batch_size", 50),
             flush_interval_s=splunk_raw.get("flush_interval_s", 5),
         ),
+        otel=_merge_otel(raw.get("otel")),
         gateway=GatewayConfig(
             host=gw_raw.get("host", "127.0.0.1"),
             port=gw_raw.get("port", 18789),

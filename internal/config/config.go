@@ -67,16 +67,25 @@ type OTelTracesConfig struct {
 	Enabled    bool   `mapstructure:"enabled"     yaml:"enabled"`
 	Sampler    string `mapstructure:"sampler"      yaml:"sampler"`
 	SamplerArg string `mapstructure:"sampler_arg"  yaml:"sampler_arg"`
+	Endpoint   string `mapstructure:"endpoint"     yaml:"endpoint"`
+	Protocol   string `mapstructure:"protocol"     yaml:"protocol"`
+	URLPath    string `mapstructure:"url_path"     yaml:"url_path"`
 }
 
 type OTelLogsConfig struct {
-	Enabled                bool `mapstructure:"enabled"                  yaml:"enabled"`
-	EmitIndividualFindings bool `mapstructure:"emit_individual_findings" yaml:"emit_individual_findings"`
+	Enabled                bool   `mapstructure:"enabled"                  yaml:"enabled"`
+	EmitIndividualFindings bool   `mapstructure:"emit_individual_findings" yaml:"emit_individual_findings"`
+	Endpoint               string `mapstructure:"endpoint"                 yaml:"endpoint"`
+	Protocol               string `mapstructure:"protocol"                 yaml:"protocol"`
+	URLPath                string `mapstructure:"url_path"                 yaml:"url_path"`
 }
 
 type OTelMetricsConfig struct {
-	Enabled         bool `mapstructure:"enabled"            yaml:"enabled"`
-	ExportIntervalS int  `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
+	Enabled         bool   `mapstructure:"enabled"            yaml:"enabled"`
+	ExportIntervalS int    `mapstructure:"export_interval_s"  yaml:"export_interval_s"`
+	Endpoint        string `mapstructure:"endpoint"           yaml:"endpoint"`
+	Protocol        string `mapstructure:"protocol"           yaml:"protocol"`
+	URLPath         string `mapstructure:"url_path"           yaml:"url_path"`
 }
 
 type OTelBatchConfig struct {
@@ -492,11 +501,34 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("otel.traces.enabled", true)
 	viper.SetDefault("otel.traces.sampler", "always_on")
 	viper.SetDefault("otel.traces.sampler_arg", "1.0")
+	viper.SetDefault("otel.traces.endpoint", "")
+	viper.SetDefault("otel.traces.protocol", "")
+	viper.SetDefault("otel.traces.url_path", "")
 	viper.SetDefault("otel.logs.enabled", true)
 	viper.SetDefault("otel.logs.emit_individual_findings", false)
+	viper.SetDefault("otel.logs.endpoint", "")
+	viper.SetDefault("otel.logs.protocol", "")
+	viper.SetDefault("otel.logs.url_path", "")
 	viper.SetDefault("otel.metrics.enabled", true)
 	viper.SetDefault("otel.metrics.export_interval_s", 60)
+	viper.SetDefault("otel.metrics.endpoint", "")
+	viper.SetDefault("otel.metrics.protocol", "")
+	viper.SetDefault("otel.metrics.url_path", "")
 	viper.SetDefault("otel.batch.max_export_batch_size", 512)
 	viper.SetDefault("otel.batch.scheduled_delay_ms", 5000)
 	viper.SetDefault("otel.batch.max_queue_size", 2048)
+
+	_ = viper.BindEnv("otel.enabled", "DEFENSECLAW_OTEL_ENABLED")
+	_ = viper.BindEnv("otel.endpoint", "DEFENSECLAW_OTEL_ENDPOINT")
+	_ = viper.BindEnv("otel.protocol", "DEFENSECLAW_OTEL_PROTOCOL")
+	_ = viper.BindEnv("otel.tls.insecure", "DEFENSECLAW_OTEL_TLS_INSECURE")
+	_ = viper.BindEnv("otel.traces.endpoint", "DEFENSECLAW_OTEL_TRACES_ENDPOINT")
+	_ = viper.BindEnv("otel.traces.protocol", "DEFENSECLAW_OTEL_TRACES_PROTOCOL")
+	_ = viper.BindEnv("otel.traces.url_path", "DEFENSECLAW_OTEL_TRACES_URL_PATH")
+	_ = viper.BindEnv("otel.metrics.endpoint", "DEFENSECLAW_OTEL_METRICS_ENDPOINT")
+	_ = viper.BindEnv("otel.metrics.protocol", "DEFENSECLAW_OTEL_METRICS_PROTOCOL")
+	_ = viper.BindEnv("otel.metrics.url_path", "DEFENSECLAW_OTEL_METRICS_URL_PATH")
+	_ = viper.BindEnv("otel.logs.endpoint", "DEFENSECLAW_OTEL_LOGS_ENDPOINT")
+	_ = viper.BindEnv("otel.logs.protocol", "DEFENSECLAW_OTEL_LOGS_PROTOCOL")
+	_ = viper.BindEnv("otel.logs.url_path", "DEFENSECLAW_OTEL_LOGS_URL_PATH")
 }

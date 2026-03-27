@@ -301,7 +301,6 @@ class TestSetupCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertTrue(self.app.cfg.scanners.skill_scanner.use_behavioral)
 
-
 class TestSetupHelpers(unittest.TestCase):
     def test_mask_short_key(self):
         from defenseclaw.commands.cmd_setup import _mask
@@ -418,6 +417,145 @@ class TestSetupMCPScannerCommonConfig(unittest.TestCase):
         self.assertNotIn("--llm-base-url", result.output)
         self.assertNotIn("--llm-timeout", result.output)
         self.assertNotIn("--llm-max-retries", result.output)
+
+
+# ---------------------------------------------------------------------------
+# Setup Splunk command
+# ---------------------------------------------------------------------------
+
+class TestSetupSplunkCommand(unittest.TestCase):
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def test_setup_splunk_help(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(setup, ["splunk", "--help"], obj=self.app)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--o11y", result.output)
+        self.assertIn("--logs", result.output)
+
+    def test_setup_splunk_o11y_non_interactive(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--o11y", "--access-token", "test-tok", "--realm", "eu0",
+             "--app-name", "myapp", "--non-interactive"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Splunk O11y configured", result.output)
+        self.assertIn("eu0", result.output)
+
+        otel = self.app.cfg.otel
+        self.assertTrue(otel.enabled)
+        self.assertEqual(otel.traces.endpoint, "ingest.eu0.observability.splunkcloud.com")
+        self.assertEqual(otel.traces.protocol, "http")
+        self.assertEqual(otel.traces.url_path, "/v2/trace/otlp")
+        self.assertEqual(otel.metrics.endpoint, "ingest.eu0.observability.splunkcloud.com")
+        self.assertEqual(otel.metrics.url_path, "/v2/datapoint/otlp")
+        self.assertEqual(otel.headers.get("X-SF-Token"), "${SPLUNK_ACCESS_TOKEN}")
+
+        dotenv_path = os.path.join(self.tmp_dir, ".env")
+        self.assertTrue(os.path.exists(dotenv_path))
+        with open(dotenv_path) as f:
+            content = f.read()
+        self.assertIn("SPLUNK_ACCESS_TOKEN=test-tok", content)
+        self.assertIn("OTEL_SERVICE_NAME=myapp", content)
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_setup_splunk_o11y_requires_token(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        os.environ.pop("SPLUNK_ACCESS_TOKEN", None)
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--o11y", "--non-interactive"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+
+    def test_setup_splunk_non_interactive_requires_flag(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--non-interactive"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+
+    def test_setup_splunk_disable_o11y(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.otel.enabled = True
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--disable", "--o11y"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self.app.cfg.otel.enabled)
+        self.assertIn("O11y (OTLP): disabled", result.output)
+
+    def test_setup_splunk_disable_logs(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.splunk.enabled = True
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--disable", "--logs"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self.app.cfg.splunk.enabled)
+        self.assertIn("HEC): disabled", result.output)
+
+    def test_setup_splunk_disable_both(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.otel.enabled = True
+        self.app.cfg.splunk.enabled = True
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--disable"],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertFalse(self.app.cfg.otel.enabled)
+        self.assertFalse(self.app.cfg.splunk.enabled)
+
+    def test_setup_splunk_interactive_o11y(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        user_input = "\n".join([
+            "y",           # Enable O11y?
+            "us1",         # Realm
+            "my-secret",   # Access token
+            "test-svc",    # Service name
+            "y",           # Traces?
+            "y",           # Metrics?
+            "n",           # Logs?
+            "n",           # Enable local?
+        ]) + "\n"
+
+        result = self.runner.invoke(
+            setup, ["splunk"], obj=self.app,
+            input=user_input, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0)
+        self.assertTrue(self.app.cfg.otel.enabled)
+        self.assertEqual(self.app.cfg.otel.traces.endpoint, "ingest.us1.observability.splunkcloud.com")
+        self.assertFalse(self.app.cfg.otel.logs.enabled)
 
 
 if __name__ == "__main__":

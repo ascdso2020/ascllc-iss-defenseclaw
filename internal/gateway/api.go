@@ -94,7 +94,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:    a.addr,
-		Handler: csrfProtect(mux),
+		Handler: a.metricsMiddleware(csrfProtect(mux)),
 		BaseContext: func(_ net.Listener) context.Context {
 			return ctx
 		},
@@ -744,6 +744,9 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 
 	result, err := ss.Scan(ctx, req.Target)
 	if err != nil {
+		if a.otel != nil {
+			a.otel.RecordScanError(r.Context(), "skill-scanner", "skill", classifyScanError(err))
+		}
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -793,6 +796,9 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 
 	result, err := ms.Scan(ctx, req.Target)
 	if err != nil {
+		if a.otel != nil {
+			a.otel.RecordScanError(r.Context(), "mcp-scanner", "mcp", classifyScanError(err))
+		}
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -900,15 +906,16 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type guardrailEventRequest struct {
-	Direction string   `json:"direction"`
-	Model     string   `json:"model"`
-	Action    string   `json:"action"`
-	Severity  string   `json:"severity"`
-	Reason    string   `json:"reason"`
-	Findings  []string `json:"findings"`
-	ElapsedMs float64  `json:"elapsed_ms"`
-	TokensIn  *int64   `json:"tokens_in,omitempty"`
-	TokensOut *int64   `json:"tokens_out,omitempty"`
+	Direction      string   `json:"direction"`
+	Model          string   `json:"model"`
+	Action         string   `json:"action"`
+	Severity       string   `json:"severity"`
+	Reason         string   `json:"reason"`
+	Findings       []string `json:"findings"`
+	ElapsedMs      float64  `json:"elapsed_ms"`
+	CiscoElapsedMs float64  `json:"cisco_elapsed_ms"`
+	TokensIn       *int64   `json:"tokens_in,omitempty"`
+	TokensOut      *int64   `json:"tokens_out,omitempty"`
 }
 
 func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request) {
@@ -950,6 +957,10 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		ctx := r.Context()
 		a.otel.RecordGuardrailEvaluation(ctx, "litellm-guardrail", req.Action)
 		a.otel.RecordGuardrailLatency(ctx, "litellm-guardrail", req.ElapsedMs)
+		if req.CiscoElapsedMs > 0 {
+			a.otel.RecordGuardrailLatency(ctx, "cisco-ai-defense", req.CiscoElapsedMs)
+			a.otel.RecordGuardrailEvaluation(ctx, "cisco-ai-defense", req.Action)
+		}
 		if req.TokensIn != nil || req.TokensOut != nil {
 			var tIn, tOut int64
 			if req.TokensIn != nil {
@@ -1170,6 +1181,32 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	}, nil
 }
 
+// metricsMiddleware records HTTP request count and duration via OTel.
+func (a *APIServer) metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.otel == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		t0 := time.Now()
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(sw, r)
+		durationMs := float64(time.Since(t0).Milliseconds())
+		a.otel.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, sw.status, durationMs)
+	})
+}
+
+// statusWriter captures the HTTP status code for metrics.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	sw.status = code
+	sw.ResponseWriter.WriteHeader(code)
+}
+
 // csrfProtect wraps a handler with localhost CSRF defenses. Mutating methods
 // (POST, PUT, PATCH, DELETE) require:
 //  1. X-DefenseClaw-Client header (blocks simple/no-cors browser requests)
@@ -1312,6 +1349,20 @@ func (a *APIServer) evaluateAdmissionPolicy(ctx context.Context, input policy.Ad
 	}, nil
 }
 
+func classifyScanError(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "not found") || strings.Contains(msg, "executable file not found"):
+		return "not_found"
+	case strings.Contains(msg, "context deadline exceeded") || strings.Contains(msg, "timeout"):
+		return "timeout"
+	case strings.Contains(msg, "parse") || strings.Contains(msg, "unmarshal") || strings.Contains(msg, "json"):
+		return "parse"
+	default:
+		return "crash"
+	}
+}
+
 func findPolicyListEntry(entries []policy.ListEntry, targetType, targetName string) (bool, string) {
 	for _, entry := range entries {
 		if entry.TargetType == targetType && entry.TargetName == targetName {
@@ -1355,6 +1406,9 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 
 	result, err := cg.Scan(r.Context(), req.Path)
 	if err != nil {
+		if a.otel != nil {
+			a.otel.RecordScanError(r.Context(), "codeguard", "code", classifyScanError(err))
+		}
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

@@ -26,6 +26,7 @@ func testSplunkForwarder(t *testing.T, handler http.HandlerFunc) *SplunkForwarde
 	f := &SplunkForwarder{
 		cfg:    cfg,
 		client: srv.Client(),
+		done:   make(chan struct{}),
 	}
 	return f
 }
@@ -189,4 +190,58 @@ func TestSplunkFlushEmptyBatchIsNoOp(t *testing.T) {
 	if hits.Load() != 0 {
 		t.Error("flush on empty batch should not call HEC")
 	}
+}
+
+func TestSplunkForwarder_PeriodicFlush(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	cfg := SplunkConfig{
+		HECEndpoint:   srv.URL,
+		HECToken:      "test-token",
+		Index:         "test",
+		Source:        "test",
+		SourceType:    "_json",
+		VerifyTLS:     false,
+		BatchSize:     100,
+		FlushInterval: 1,
+	}
+
+	f := &SplunkForwarder{
+		cfg:    cfg,
+		client: srv.Client(),
+		done:   make(chan struct{}),
+	}
+	f.ticker = time.NewTicker(100 * time.Millisecond)
+	go f.flushLoop()
+
+	_ = f.ForwardEvent(makeEvent("tick-1"))
+
+	time.Sleep(300 * time.Millisecond)
+
+	if hits.Load() < 1 {
+		t.Error("periodic flush should have fired within 300ms")
+	}
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestSplunkForwarder_CloseStopsTicker(t *testing.T) {
+	f := testSplunkForwarder(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	f.ticker = time.NewTicker(50 * time.Millisecond)
+	go f.flushLoop()
+
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
 }

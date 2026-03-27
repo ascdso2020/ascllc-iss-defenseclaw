@@ -12,6 +12,44 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// EmitStartupSpan creates a short-lived span to verify the trace export pipeline
+// is working. Called once at sidecar startup.
+func (p *Provider) EmitStartupSpan(ctx context.Context) {
+	if !p.TracesEnabled() {
+		return
+	}
+	_, span := p.tracer.Start(ctx, "defenseclaw/startup",
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithTimestamp(time.Now()),
+	)
+	span.SetAttributes(attribute.String("defenseclaw.event", "sidecar_start"))
+	span.SetStatus(codes.Ok, "")
+	span.End()
+}
+
+// EmitInspectSpan creates a span for a tool/message inspection evaluation.
+func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity string, durationMs float64) {
+	if !p.TracesEnabled() {
+		return
+	}
+	_, span := p.tracer.Start(ctx, fmt.Sprintf("inspect/%s", tool),
+		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithTimestamp(time.Now().Add(-time.Duration(durationMs)*time.Millisecond)),
+	)
+	span.SetAttributes(
+		attribute.String("defenseclaw.inspect.tool", tool),
+		attribute.String("defenseclaw.inspect.action", action),
+		attribute.String("defenseclaw.inspect.severity", severity),
+		attribute.Float64("defenseclaw.inspect.duration_ms", durationMs),
+	)
+	if action == "block" {
+		span.SetStatus(codes.Error, "blocked")
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	span.End()
+}
+
 // StartToolSpan starts a new OTel span for a tool_call event.
 // Raw args are not exported to avoid leaking tokens, keys, or prompt content.
 // Metrics are always recorded when OTel is enabled, even if traces are off.

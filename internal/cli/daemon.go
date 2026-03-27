@@ -2,6 +2,9 @@ package cli
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -84,6 +87,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	fmt.Println()
 	fmt.Println("Use 'defenseclaw-gateway status' to check health")
 	fmt.Println("Use 'defenseclaw-gateway stop' to stop the daemon")
+	printSplunkLocalHint()
 
 	return nil
 }
@@ -132,8 +136,52 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	fmt.Printf("OK (PID %d)\n", pid)
 	fmt.Println()
 	fmt.Println("Use 'defenseclaw-gateway status' to check health")
+	printSplunkLocalHint()
 
 	return nil
+}
+
+// printSplunkLocalHint prints Splunk Web credentials when the local bridge
+// is configured, so the user knows how to access the dashboards.
+func printSplunkLocalHint() {
+	dotenvPath := filepath.Join(config.DefaultDataPath(), ".env")
+	env := readDotEnv(dotenvPath)
+	user := env["DEFENSECLAW_LOCAL_USERNAME"]
+	pass := env["DEFENSECLAW_LOCAL_PASSWORD"]
+	if user == "" || pass == "" {
+		return
+	}
+	fmt.Println()
+	fmt.Println("Splunk Local Mode:")
+	fmt.Printf("  Web UI:   http://127.0.0.1:8000\n")
+	fmt.Printf("  Username: %s\n", user)
+	fmt.Printf("  Password: %s\n", pass)
+}
+
+// readDotEnv reads KEY=VALUE pairs from a .env file.
+func readDotEnv(path string) map[string]string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	env := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		env[k] = v
+	}
+	return env
 }
 
 func collectDaemonArgs(cmd *cobra.Command) []string {

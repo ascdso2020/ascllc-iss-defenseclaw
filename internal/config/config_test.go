@@ -569,6 +569,180 @@ func TestConfig_PluginDirs(t *testing.T) {
 	}
 }
 
+func TestDefaultConfig_OTelPerSignalFields(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.OTel.Enabled {
+		t.Error("otel should be disabled by default")
+	}
+
+	t.Run("per-signal fields default to empty", func(t *testing.T) {
+		signals := []struct {
+			name     string
+			endpoint string
+			protocol string
+		}{
+			{"traces", cfg.OTel.Traces.Endpoint, cfg.OTel.Traces.Protocol},
+			{"metrics", cfg.OTel.Metrics.Endpoint, cfg.OTel.Metrics.Protocol},
+			{"logs", cfg.OTel.Logs.Endpoint, cfg.OTel.Logs.Protocol},
+		}
+		for _, s := range signals {
+			if s.endpoint != "" {
+				t.Errorf("%s.endpoint should be empty, got %q", s.name, s.endpoint)
+			}
+			if s.protocol != "" {
+				t.Errorf("%s.protocol should be empty, got %q", s.name, s.protocol)
+			}
+		}
+	})
+
+	t.Run("url_path fields default to empty", func(t *testing.T) {
+		if cfg.OTel.Traces.URLPath != "" {
+			t.Errorf("traces.url_path should be empty, got %q", cfg.OTel.Traces.URLPath)
+		}
+		if cfg.OTel.Metrics.URLPath != "" {
+			t.Errorf("metrics.url_path should be empty, got %q", cfg.OTel.Metrics.URLPath)
+		}
+	})
+}
+
+func TestOTelConfig_PerSignalOverride(t *testing.T) {
+	cfg := OTelConfig{
+		Endpoint: "global:4317",
+		Protocol: "grpc",
+		Traces: OTelTracesConfig{
+			Endpoint: "traces:443",
+			Protocol: "http",
+			URLPath:  "/v2/trace/otlp",
+		},
+		Metrics: OTelMetricsConfig{
+			Endpoint: "metrics:443",
+			Protocol: "http",
+			URLPath:  "/v2/datapoint/otlp",
+		},
+	}
+
+	if cfg.Traces.Endpoint != "traces:443" {
+		t.Errorf("traces endpoint: got %q", cfg.Traces.Endpoint)
+	}
+	if cfg.Traces.Protocol != "http" {
+		t.Errorf("traces protocol: got %q", cfg.Traces.Protocol)
+	}
+	if cfg.Traces.URLPath != "/v2/trace/otlp" {
+		t.Errorf("traces url_path: got %q", cfg.Traces.URLPath)
+	}
+	if cfg.Metrics.Endpoint != "metrics:443" {
+		t.Errorf("metrics endpoint: got %q", cfg.Metrics.Endpoint)
+	}
+	if cfg.Metrics.URLPath != "/v2/datapoint/otlp" {
+		t.Errorf("metrics url_path: got %q", cfg.Metrics.URLPath)
+	}
+	if cfg.Logs.Endpoint != "" {
+		t.Errorf("logs endpoint should fall back to empty, got %q", cfg.Logs.Endpoint)
+	}
+	if cfg.Logs.Protocol != "" {
+		t.Errorf("logs protocol should fall back to empty, got %q", cfg.Logs.Protocol)
+	}
+}
+
+func TestOTelEnvVarBindings(t *testing.T) {
+	envTests := []struct {
+		envKey string
+		value  string
+		check  func(*Config) string
+	}{
+		{
+			"DEFENSECLAW_OTEL_TRACES_ENDPOINT",
+			"traces.example.com:443",
+			func(c *Config) string { return c.OTel.Traces.Endpoint },
+		},
+		{
+			"DEFENSECLAW_OTEL_TRACES_PROTOCOL",
+			"http",
+			func(c *Config) string { return c.OTel.Traces.Protocol },
+		},
+		{
+			"DEFENSECLAW_OTEL_TRACES_URL_PATH",
+			"/v2/trace/otlp",
+			func(c *Config) string { return c.OTel.Traces.URLPath },
+		},
+		{
+			"DEFENSECLAW_OTEL_METRICS_ENDPOINT",
+			"metrics.example.com:443",
+			func(c *Config) string { return c.OTel.Metrics.Endpoint },
+		},
+		{
+			"DEFENSECLAW_OTEL_METRICS_PROTOCOL",
+			"http",
+			func(c *Config) string { return c.OTel.Metrics.Protocol },
+		},
+		{
+			"DEFENSECLAW_OTEL_METRICS_URL_PATH",
+			"/v2/datapoint/otlp",
+			func(c *Config) string { return c.OTel.Metrics.URLPath },
+		},
+		{
+			"DEFENSECLAW_OTEL_LOGS_ENDPOINT",
+			"logs.example.com:443",
+			func(c *Config) string { return c.OTel.Logs.Endpoint },
+		},
+		{
+			"DEFENSECLAW_OTEL_LOGS_PROTOCOL",
+			"http",
+			func(c *Config) string { return c.OTel.Logs.Protocol },
+		},
+		{
+			"DEFENSECLAW_OTEL_ENDPOINT",
+			"global.example.com:4317",
+			func(c *Config) string { return c.OTel.Endpoint },
+		},
+		{
+			"DEFENSECLAW_OTEL_PROTOCOL",
+			"http",
+			func(c *Config) string { return c.OTel.Protocol },
+		},
+	}
+
+	for _, tt := range envTests {
+		t.Run(tt.envKey, func(t *testing.T) {
+			t.Setenv(tt.envKey, tt.value)
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() error: %v", err)
+			}
+			got := tt.check(cfg)
+			if got != tt.value {
+				t.Errorf("%s: got %q, want %q", tt.envKey, got, tt.value)
+			}
+		})
+	}
+}
+
+func TestOTelEnvVarEnabled(t *testing.T) {
+	t.Setenv("DEFENSECLAW_OTEL_ENABLED", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.OTel.Enabled {
+		t.Error("OTel.Enabled should be true when DEFENSECLAW_OTEL_ENABLED=true")
+	}
+}
+
+func TestOTelEnvVarTLSInsecure(t *testing.T) {
+	t.Setenv("DEFENSECLAW_OTEL_TLS_INSECURE", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.OTel.TLS.Insecure {
+		t.Error("OTel.TLS.Insecure should be true when DEFENSECLAW_OTEL_TLS_INSECURE=true")
+	}
+}
+
 func TestConfig_ClawHomeDir(t *testing.T) {
 	cfg := &Config{
 		Claw: ClawConfig{HomeDir: "/tmp/my-claw"},

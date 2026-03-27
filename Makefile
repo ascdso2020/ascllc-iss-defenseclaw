@@ -11,7 +11,7 @@ OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
 
 DIST_DIR    := dist
 
-.PHONY: build install dev-install pycli dev-pycli gateway gateway-cross gateway-run gateway-install \
+.PHONY: build install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install test cli-test cli-test-cov gateway-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         dist dist-cli dist-gateway dist-plugin dist-checksums dist-clean
@@ -74,6 +74,9 @@ gateway-cross:
 
 gateway-run: gateway
 	./$(GATEWAY)
+
+start: gateway
+	@./scripts/start.sh $(ARGS)
 
 plugin:
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }

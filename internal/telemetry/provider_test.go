@@ -146,6 +146,57 @@ func TestExpandHeaders_MissingEnv(t *testing.T) {
 	}
 }
 
+func TestExpandHeaders_SplunkTokenAutoInject(t *testing.T) {
+	t.Setenv("SPLUNK_ACCESS_TOKEN", "splunk-secret-123")
+	headers := map[string]string{}
+	expanded := expandHeaders(headers)
+	if expanded["X-SF-Token"] != "splunk-secret-123" {
+		t.Errorf("expected auto-injected X-SF-Token, got %q", expanded["X-SF-Token"])
+	}
+}
+
+func TestExpandHeaders_SplunkTokenNoOverride(t *testing.T) {
+	t.Setenv("SPLUNK_ACCESS_TOKEN", "from-env")
+	headers := map[string]string{
+		"X-SF-Token": "explicit-value",
+	}
+	expanded := expandHeaders(headers)
+	if expanded["X-SF-Token"] != "explicit-value" {
+		t.Errorf("explicit header should not be overridden, got %q", expanded["X-SF-Token"])
+	}
+}
+
+func TestExpandHeaders_NoSplunkToken(t *testing.T) {
+	t.Setenv("SPLUNK_ACCESS_TOKEN", "")
+	headers := map[string]string{}
+	expanded := expandHeaders(headers)
+	if _, ok := expanded["X-SF-Token"]; ok && expanded["X-SF-Token"] != "" {
+		t.Errorf("should not inject empty token, got %q", expanded["X-SF-Token"])
+	}
+}
+
+func TestResolveValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		signal  string
+		global  string
+		want    string
+	}{
+		{"signal set", "signal-endpoint", "global-endpoint", "signal-endpoint"},
+		{"signal empty", "", "global-endpoint", "global-endpoint"},
+		{"both empty", "", "", ""},
+		{"signal set global empty", "signal-endpoint", "", "signal-endpoint"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveValue(tt.signal, tt.global)
+			if got != tt.want {
+				t.Errorf("resolveValue(%q, %q) = %q, want %q", tt.signal, tt.global, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildSampler(t *testing.T) {
 	tests := []struct {
 		name string
@@ -190,6 +241,8 @@ func TestActionMapping(t *testing.T) {
 		{"enable", "enable", "user"},
 		{"api-skill-disable", "disable", "user"},
 		{"api-skill-enable", "enable", "user"},
+		{"watch-start", "watch-start", "watcher"},
+		{"watch-stop", "watch-stop", "watcher"},
 	}
 
 	for _, tt := range tests {
@@ -212,7 +265,7 @@ func TestNonLifecycleActionsExcluded(t *testing.T) {
 	nonLifecycle := []string{
 		"sidecar-start", "sidecar-stop", "sidecar-connected",
 		"gateway-tool-call", "gateway-tool-result",
-		"gateway-approval-requested", "watch-start", "watch-stop",
+		"gateway-approval-requested",
 		"api-config-patch",
 	}
 	for _, action := range nonLifecycle {
@@ -487,6 +540,55 @@ func TestAlertSeverityToOTel(t *testing.T) {
 	}
 }
 
+func TestResolveServiceName(t *testing.T) {
+	tests := []struct {
+		name    string
+		envVal  string
+		attrs   map[string]string
+		want    string
+	}{
+		{
+			"env var takes priority",
+			"from-env",
+			map[string]string{"service.name": "from-config"},
+			"from-env",
+		},
+		{
+			"config attr used when no env",
+			"",
+			map[string]string{"service.name": "from-config"},
+			"from-config",
+		},
+		{
+			"default when both empty",
+			"",
+			map[string]string{},
+			"defenseclaw",
+		},
+		{
+			"default when nil attrs",
+			"",
+			nil,
+			"defenseclaw",
+		},
+		{
+			"env var empty string falls through",
+			"",
+			map[string]string{"service.name": ""},
+			"defenseclaw",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OTEL_SERVICE_NAME", tt.envVal)
+			got := resolveServiceName(tt.attrs)
+			if got != tt.want {
+				t.Errorf("resolveServiceName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildResource(t *testing.T) {
 	cfg := disabledCfg()
 	cfg.OTel.Resource.Attributes = map[string]string{
@@ -496,6 +598,85 @@ func TestBuildResource(t *testing.T) {
 	if res == nil {
 		t.Fatal("resource should not be nil")
 	}
+}
+
+func TestBuildResource_ServiceNameFromEnv(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "my-app-from-env")
+	cfg := disabledCfg()
+	cfg.OTel.Resource.Attributes = map[string]string{
+		"service.name": "from-config",
+	}
+
+	res := buildResource(cfg, "1.0.0")
+	iter := res.Iter()
+	var found string
+	count := 0
+	for iter.Next() {
+		kv := iter.Attribute()
+		if string(kv.Key) == "service.name" {
+			found = kv.Value.AsString()
+			count++
+		}
+	}
+	if found != "my-app-from-env" {
+		t.Errorf("service.name = %q, want %q", found, "my-app-from-env")
+	}
+	if count != 1 {
+		t.Errorf("service.name appeared %d times, want exactly 1 (no duplicates)", count)
+	}
+}
+
+func TestBuildResource_ServiceNameDedup(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	cfg := disabledCfg()
+	cfg.OTel.Resource.Attributes = map[string]string{
+		"service.name": "custom-name",
+		"custom.attr":  "value",
+	}
+
+	res := buildResource(cfg, "1.0.0")
+	iter := res.Iter()
+	serviceNameCount := 0
+	customAttrFound := false
+	var serviceNameVal string
+	for iter.Next() {
+		kv := iter.Attribute()
+		switch string(kv.Key) {
+		case "service.name":
+			serviceNameCount++
+			serviceNameVal = kv.Value.AsString()
+		case "custom.attr":
+			customAttrFound = true
+		}
+	}
+	if serviceNameCount != 1 {
+		t.Errorf("service.name appeared %d times, want 1", serviceNameCount)
+	}
+	if serviceNameVal != "custom-name" {
+		t.Errorf("service.name = %q, want %q", serviceNameVal, "custom-name")
+	}
+	if !customAttrFound {
+		t.Error("custom.attr should still be present in resource")
+	}
+}
+
+func TestBuildResource_DefaultServiceName(t *testing.T) {
+	t.Setenv("OTEL_SERVICE_NAME", "")
+	cfg := disabledCfg()
+	cfg.OTel.Resource.Attributes = map[string]string{}
+
+	res := buildResource(cfg, "1.0.0")
+	iter := res.Iter()
+	for iter.Next() {
+		kv := iter.Attribute()
+		if string(kv.Key) == "service.name" {
+			if kv.Value.AsString() != "defenseclaw" {
+				t.Errorf("service.name = %q, want %q", kv.Value.AsString(), "defenseclaw")
+			}
+			return
+		}
+	}
+	t.Error("service.name attribute not found")
 }
 
 // ---------------------------------------------------------------------------

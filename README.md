@@ -460,6 +460,36 @@ The Go daemon forwards audit events to Splunk in real time. Set `splunk.enabled:
 export DEFENSECLAW_SPLUNK_HEC_TOKEN="your-hec-token"
 ```
 
+For the local Splunk workflow, use the preset instead of editing the generic
+Splunk block by hand:
+
+```bash
+defenseclaw setup splunk-local --non-interactive
+```
+
+That command uses the bundled local bridge runtime shipped with `DefenseClaw`
+and aligns the sidecar with the local bridge contract:
+
+- HEC endpoint `http://127.0.0.1:8088/services/collector/event`
+- index `defenseclaw_local`
+- source `defenseclaw`
+- sourcetype `defenseclaw:json`
+
+Recommended local flow:
+
+1. Run `defenseclaw setup splunk-local --non-interactive`
+2. Start the DefenseClaw sidecar
+3. Open local Splunk with the URL and credentials printed by the setup command
+4. Validate events in local Splunk
+
+For advanced or debugging use, the manual bridge contract can still be used:
+
+1. Run `defenseclaw setup splunk-local --non-interactive --no-bootstrap-bridge`
+2. Start the bundled local bridge manually
+3. Export `DEFENSECLAW_SPLUNK_HEC_TOKEN`
+4. Start the DefenseClaw sidecar
+5. Validate events in local Splunk
+
 Events are batched (default 50) and flushed every 5 seconds. Each event includes OTEL-shaped fields with pre-computed Splunk CIM metadata for zero-transformation indexing.
 
 ### OTLP Export

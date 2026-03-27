@@ -248,7 +248,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s",
 			verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, mode))
 
-	// OTel: emit CodeGuard alerts and guardrail metrics for write_file/edit_file.
+	if a.otel != nil {
+		elapsedMs := float64(elapsed.Milliseconds())
+		a.otel.RecordInspectEvaluation(context.Background(), req.Tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectLatency(context.Background(), req.Tool, elapsedMs)
+		a.otel.RecordGuardrailEvaluation(context.Background(), "policy-rules", verdict.Action)
+		a.otel.RecordGuardrailLatency(context.Background(), "policy-rules", elapsedMs)
+		a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
+	}
+
 	a.emitCodeGuardOTel(&req, verdict, elapsed)
 
 	a.writeJSON(w, http.StatusOK, verdict)

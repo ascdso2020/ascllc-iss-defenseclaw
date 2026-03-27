@@ -68,6 +68,9 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> Non
     click.echo("  Directories:   created")
 
     _seed_rego_policies(cfg.policy_dir)
+    _seed_splunk_bridge(cfg.data_dir)
+
+    cfg.save()
     click.echo(f"  Config file:   {cfg_file}")
 
     store = Store(cfg.audit_db)
@@ -150,6 +153,28 @@ def _seed_rego_policies(policy_dir: str) -> None:
                 shutil.copy2(str(src), dst)
 
     click.echo(f"  Rego policies: {dest_rego}")
+
+
+def _seed_splunk_bridge(data_dir: str) -> None:
+    """Copy vendored Splunk bridge runtime into ~/.defenseclaw/splunk-bridge/."""
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    repo_root = here.parent.parent.parent.parent
+    bundled = repo_root / "bundles" / "splunk_local_bridge"
+    if not bundled.is_dir():
+        return
+
+    dest = os.path.join(data_dir, "splunk-bridge")
+    if os.path.isdir(dest):
+        click.echo(f"  Splunk bridge: preserved existing ({dest})")
+        return
+
+    shutil.copytree(str(bundled), dest)
+    bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
+    if os.path.isfile(bridge_bin):
+        os.chmod(bridge_bin, 0o755)
+    click.echo(f"  Splunk bridge: seeded in {dest}")
 
 
 def _install_scanners(cfg, logger, skip: bool) -> None:

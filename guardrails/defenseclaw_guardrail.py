@@ -393,10 +393,14 @@ class DefenseClawGuardrail(CustomGuardrail):
             local_result.setdefault("scanner_sources", ["local-pattern"])
             return local_result
 
+        cisco_elapsed_ms: float = 0.0
         if self.scanner_mode in ("remote", "both") and self._cisco_client and messages:
+            _t0 = time.monotonic()
             cisco_result = self._cisco_client.inspect(messages)
+            cisco_elapsed_ms = (time.monotonic() - _t0) * 1000
 
         merged = _merge_verdicts(local_result, cisco_result)
+        merged["cisco_elapsed_ms"] = cisco_elapsed_ms
 
         opa_verdict = self._evaluate_via_sidecar(
             direction=direction,
@@ -737,6 +741,7 @@ class DefenseClawGuardrail(CustomGuardrail):
                 "reason": verdict.get("reason", ""),
                 "findings": verdict.get("findings", []),
                 "elapsed_ms": elapsed_ms,
+                "cisco_elapsed_ms": verdict.get("cisco_elapsed_ms", 0),
             }
             if tokens_in is not None:
                 payload["tokens_in"] = tokens_in

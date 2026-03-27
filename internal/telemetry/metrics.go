@@ -14,6 +14,7 @@ type metricsSet struct {
 	scanDuration      metric.Float64Histogram
 	scanFindings      metric.Int64Counter
 	scanFindingsGauge metric.Int64UpDownCounter
+	scanErrors        metric.Int64Counter
 
 	// Runtime metrics
 	toolCalls     metric.Int64Counter
@@ -28,6 +29,29 @@ type metricsSet struct {
 	alertCount           metric.Int64Counter
 	guardrailEvaluations metric.Int64Counter
 	guardrailLatency     metric.Float64Histogram
+
+	// HTTP API metrics
+	httpRequestCount    metric.Int64Counter
+	httpRequestDuration metric.Float64Histogram
+
+	// Admission gate metrics
+	admissionDecisions metric.Int64Counter
+
+	// Watcher metrics
+	watcherEvents   metric.Int64Counter
+	watcherErrors   metric.Int64Counter
+	watcherRestarts metric.Int64Counter
+
+	// Inspect metrics (policy-rules for all tool/message paths)
+	inspectEvaluations metric.Int64Counter
+	inspectLatency     metric.Float64Histogram
+
+	// Audit store metrics
+	auditDBErrors metric.Int64Counter
+	auditEvents   metric.Int64Counter
+
+	// Config metrics
+	configLoadErrors metric.Int64Counter
 }
 
 func newMetricsSet(m metric.Meter) (*metricsSet, error) {
@@ -128,6 +152,90 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.guardrailLatency, err = m.Float64Histogram("defenseclaw.guardrail.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("Guardrail evaluation latency distribution"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.scanErrors, err = m.Int64Counter("defenseclaw.scan.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Scanner invocations that failed (crash, timeout, not found)"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.httpRequestCount, err = m.Int64Counter("defenseclaw.http.request.count",
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Total HTTP requests to the sidecar API"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.httpRequestDuration, err = m.Float64Histogram("defenseclaw.http.request.duration",
+		metric.WithUnit("ms"),
+		metric.WithDescription("HTTP request duration distribution"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.admissionDecisions, err = m.Int64Counter("defenseclaw.admission.decisions",
+		metric.WithUnit("{decision}"),
+		metric.WithDescription("Admission gate decisions"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.watcherEvents, err = m.Int64Counter("defenseclaw.watcher.events",
+		metric.WithUnit("{event}"),
+		metric.WithDescription("Filesystem watcher events observed"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.watcherErrors, err = m.Int64Counter("defenseclaw.watcher.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Filesystem watcher errors"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.watcherRestarts, err = m.Int64Counter("defenseclaw.watcher.restarts",
+		metric.WithUnit("{restart}"),
+		metric.WithDescription("Watcher or gateway reconnection events"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.inspectEvaluations, err = m.Int64Counter("defenseclaw.inspect.evaluations",
+		metric.WithUnit("{evaluation}"),
+		metric.WithDescription("Tool/message inspect evaluations"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.inspectLatency, err = m.Float64Histogram("defenseclaw.inspect.latency",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Tool/message inspect latency distribution"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.auditDBErrors, err = m.Int64Counter("defenseclaw.audit.db.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("SQLite audit store operation failures"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.auditEvents, err = m.Int64Counter("defenseclaw.audit.events.total",
+		metric.WithUnit("{event}"),
+		metric.WithDescription("Total audit events persisted"))
+	if err != nil {
+		return nil, err
+	}
+
+	ms.configLoadErrors, err = m.Int64Counter("defenseclaw.config.load.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Configuration load or validation errors"))
 	if err != nil {
 		return nil, err
 	}
@@ -285,5 +393,123 @@ func (p *Provider) RecordGuardrailLatency(ctx context.Context, scanner string, d
 	}
 	p.metrics.guardrailLatency.Record(ctx, durationMs, metric.WithAttributes(
 		attribute.String("guardrail.scanner", scanner),
+	))
+}
+
+// RecordScanError records a scanner invocation failure.
+func (p *Provider) RecordScanError(ctx context.Context, scanner, targetType, errorType string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.scanErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("scanner", scanner),
+		attribute.String("target_type", targetType),
+		attribute.String("error_type", errorType),
+	))
+}
+
+// RecordHTTPRequest records an HTTP API request metric.
+func (p *Provider) RecordHTTPRequest(ctx context.Context, method, route string, statusCode int, durationMs float64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("http.method", method),
+		attribute.String("http.route", route),
+		attribute.Int("http.status_code", statusCode),
+	)
+	p.metrics.httpRequestCount.Add(ctx, 1, attrs)
+	p.metrics.httpRequestDuration.Record(ctx, durationMs, attrs)
+}
+
+// RecordAdmissionDecision records an admission gate decision.
+func (p *Provider) RecordAdmissionDecision(ctx context.Context, decision, targetType, source string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.admissionDecisions.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("decision", decision),
+		attribute.String("target_type", targetType),
+		attribute.String("source", source),
+	))
+}
+
+// RecordWatcherEvent records a filesystem watcher event.
+func (p *Provider) RecordWatcherEvent(ctx context.Context, eventType, targetType string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.watcherEvents.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("event_type", eventType),
+		attribute.String("target_type", targetType),
+	))
+}
+
+// RecordWatcherError records a filesystem watcher error.
+func (p *Provider) RecordWatcherError(ctx context.Context) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.watcherErrors.Add(ctx, 1)
+}
+
+// RecordWatcherRestart records a watcher or gateway reconnection.
+func (p *Provider) RecordWatcherRestart(ctx context.Context) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.watcherRestarts.Add(ctx, 1)
+}
+
+// RecordInspectEvaluation records a tool/message inspect evaluation.
+func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, severity string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("tool", tool),
+		attribute.String("action", action),
+		attribute.String("severity", severity),
+	))
+}
+
+// RecordInspectLatency records tool/message inspect latency.
+func (p *Provider) RecordInspectLatency(ctx context.Context, tool string, durationMs float64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.inspectLatency.Record(ctx, durationMs, metric.WithAttributes(
+		attribute.String("tool", tool),
+	))
+}
+
+// RecordAuditDBError records an SQLite audit store operation failure.
+func (p *Provider) RecordAuditDBError(ctx context.Context, operation string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.auditDBErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("operation", operation),
+	))
+}
+
+// RecordAuditEvent records that an audit event was persisted.
+func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("action", action),
+		attribute.String("severity", severity),
+	))
+}
+
+// RecordConfigLoadError records a config load or validation error.
+func (p *Provider) RecordConfigLoadError(ctx context.Context, errorType string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.configLoadErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("error_type", errorType),
 	))
 }

@@ -65,8 +65,10 @@ func (r *EventRouter) Route(evt EventFrame) {
 		r.handleSessionTool(evt)
 	case "agent":
 		r.handleAgentEvent(evt)
+	case "session.message":
+		r.handleSessionMessage(evt)
 	case "tick", "health", "chat", "presence", "heartbeat",
-		"sessions.changed", "session.message",
+		"sessions.changed",
 		"exec.approval.resolved":
 		// known events, no action needed from router
 	default:
@@ -89,14 +91,53 @@ type SessionToolPayload struct {
 	Status   string          `json:"status,omitempty"`
 	ExitCode *int            `json:"exit_code,omitempty"`
 	CallID   string          `json:"callId,omitempty"`
+
+	// OpenClaw stream format: {data: {phase, name, toolCallId, args, ...}}
+	Data *sessionToolData `json:"data,omitempty"`
+}
+
+type sessionToolData struct {
+	Phase      string          `json:"phase"`      // "start", "update", "result"
+	Name       string          `json:"name"`       // tool name
+	ToolCallID string          `json:"toolCallId"`
+	Args       json.RawMessage `json:"args,omitempty"`
+	Meta       string          `json:"meta,omitempty"`
+	IsError    bool            `json:"isError,omitempty"`
 }
 
 func (r *EventRouter) handleSessionTool(evt EventFrame) {
 	var payload SessionToolPayload
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		fmt.Fprintf(os.Stderr, "[sidecar] parse session.tool: %v\n", err)
-		fmt.Fprintf(os.Stderr, "[sidecar] raw session.tool payload: %s\n", string(evt.Payload))
 		return
+	}
+
+	// Normalize OpenClaw stream format into the flat field layout.
+	if payload.Data != nil {
+		d := payload.Data
+		if payload.Name == "" && payload.Tool == "" {
+			payload.Name = d.Name
+		}
+		if payload.CallID == "" {
+			payload.CallID = d.ToolCallID
+		}
+		if payload.Args == nil && d.Args != nil {
+			payload.Args = d.Args
+		}
+		switch d.Phase {
+		case "start":
+			payload.Type = "call"
+		case "result":
+			payload.Type = "result"
+			if d.IsError {
+				code := 1
+				payload.ExitCode = &code
+			}
+		case "update":
+			return // intermediate progress, nothing to trace
+		default:
+			payload.Type = d.Phase
+		}
 	}
 
 	toolName := payload.Tool
@@ -104,11 +145,15 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 		toolName = payload.Name
 	}
 
-	fmt.Fprintf(os.Stderr, "[sidecar] session.tool type=%s tool=%s status=%s callId=%s\n",
-		payload.Type, toolName, payload.Status, payload.CallID)
+	if toolName == "" && payload.Type == "" {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "[sidecar] session.tool type=%s tool=%s callId=%s\n",
+		payload.Type, toolName, payload.CallID)
 
 	switch payload.Type {
-	case "call", "invoke", "":
+	case "call", "invoke":
 		args := payload.Args
 		if args == nil {
 			args = payload.Input
@@ -135,9 +180,27 @@ func (r *EventRouter) handleSessionTool(evt EventFrame) {
 		r.handleToolResult(syntheticEvt)
 
 	default:
-		fmt.Fprintf(os.Stderr, "[sidecar] session.tool unknown type=%s raw=%s\n",
-			payload.Type, truncate(string(evt.Payload), 200))
+		fmt.Fprintf(os.Stderr, "[sidecar] session.tool unknown type=%s tool=%s\n",
+			payload.Type, toolName)
 	}
+}
+
+// handleSessionMessage extracts tool call/result data from session.message
+// events. OpenClaw sends tool execution updates inside session.message when
+// the sidecar is subscribed to a session, using the same stream format as
+// session.tool (runId, stream:"tool", data:{phase, name, ...}).
+func (r *EventRouter) handleSessionMessage(evt EventFrame) {
+	var envelope struct {
+		Stream string          `json:"stream"`
+		Data   json.RawMessage `json:"data,omitempty"`
+	}
+	if err := json.Unmarshal(evt.Payload, &envelope); err != nil {
+		return
+	}
+	if envelope.Stream != "tool" || envelope.Data == nil {
+		return
+	}
+	r.handleSessionTool(evt)
 }
 
 func mustMarshal(v interface{}) json.RawMessage {

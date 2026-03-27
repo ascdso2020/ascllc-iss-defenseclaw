@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -46,6 +47,9 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 		result.Duration.Milliseconds(), len(result.Findings),
 		string(result.MaxSeverity()), string(raw),
 	); err != nil {
+		if l.otel != nil {
+			l.otel.RecordAuditDBError(context.Background(), "insert_scan_result")
+		}
 		return err
 	}
 
@@ -57,6 +61,9 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 			f.Description, f.Location, f.Remediation, f.Scanner,
 			string(tagsJSON),
 		); err != nil {
+			if l.otel != nil {
+				l.otel.RecordAuditDBError(context.Background(), "insert_finding")
+			}
 			return err
 		}
 	}
@@ -71,7 +78,13 @@ func (l *Logger) LogScanWithVerdict(result *scanner.ScanResult, verdict string) 
 	}
 
 	if err := l.store.LogEvent(event); err != nil {
+		if l.otel != nil {
+			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		}
 		return err
+	}
+	if l.otel != nil {
+		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
 	l.forwardToSplunk(event)
 
@@ -100,7 +113,13 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		Severity:  "INFO",
 	}
 	if err := l.store.LogEvent(event); err != nil {
+		if l.otel != nil {
+			l.otel.RecordAuditDBError(context.Background(), "insert_event")
+		}
 		return err
+	}
+	if l.otel != nil {
+		l.otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
 	}
 	l.forwardToSplunk(event)
 

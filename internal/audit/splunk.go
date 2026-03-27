@@ -42,6 +42,8 @@ type SplunkForwarder struct {
 	client *http.Client
 	mu     sync.Mutex
 	batch  []splunkEvent
+	ticker *time.Ticker
+	done   chan struct{}
 }
 
 type splunkEvent struct {
@@ -78,13 +80,32 @@ func NewSplunkForwarder(cfg SplunkConfig) (*SplunkForwarder, error) {
 		},
 	}
 
-	return &SplunkForwarder{
+	f := &SplunkForwarder{
 		cfg: cfg,
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   10 * time.Second,
 		},
-	}, nil
+		done: make(chan struct{}),
+	}
+
+	if cfg.FlushInterval > 0 {
+		f.ticker = time.NewTicker(time.Duration(cfg.FlushInterval) * time.Second)
+		go f.flushLoop()
+	}
+
+	return f, nil
+}
+
+func (f *SplunkForwarder) flushLoop() {
+	for {
+		select {
+		case <-f.ticker.C:
+			_ = f.Flush()
+		case <-f.done:
+			return
+		}
+	}
 }
 
 func (f *SplunkForwarder) ForwardEvent(e Event) error {
@@ -179,5 +200,13 @@ func (f *SplunkForwarder) ExportEvents(events []Event) error {
 }
 
 func (f *SplunkForwarder) Close() error {
+	if f.ticker != nil {
+		f.ticker.Stop()
+	}
+	select {
+	case <-f.done:
+	default:
+		close(f.done)
+	}
 	return f.Flush()
 }

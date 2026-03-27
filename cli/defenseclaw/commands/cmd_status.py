@@ -69,6 +69,9 @@ def status(app: AppContext) -> None:
         except Exception:
             pass
 
+    # Splunk integration
+    _print_splunk_integration_status(cfg)
+
     # Sidecar status
     click.echo()
     from defenseclaw.gateway import OrchestratorClient
@@ -77,3 +80,33 @@ def status(app: AppContext) -> None:
         click.secho("  Sidecar:      running", fg="green")
     else:
         click.echo("  Sidecar:      not running")
+
+
+def _print_splunk_integration_status(cfg) -> None:
+    otel = cfg.otel
+    sc = cfg.splunk
+    has_splunk = otel.enabled or sc.enabled
+
+    if not has_splunk:
+        click.echo()
+        click.echo("  Splunk:       not configured")
+        return
+
+    click.echo()
+    click.echo("  Splunk:")
+
+    if otel.enabled:
+        click.echo("    O11y (OTLP):    enabled")
+        if otel.traces.enabled and otel.traces.endpoint:
+            click.echo(f"      Traces:       {otel.traces.endpoint}{otel.traces.url_path}")
+        if otel.metrics.enabled and otel.metrics.endpoint:
+            click.echo(f"      Metrics:      {otel.metrics.endpoint}{otel.metrics.url_path}")
+        if otel.logs.enabled and otel.logs.endpoint:
+            click.echo(f"      Logs:         {otel.logs.endpoint}{otel.logs.url_path}")
+    else:
+        click.echo("    O11y (OTLP):    disabled")
+
+    if sc.enabled:
+        click.echo(f"    HEC (logs):     enabled → {sc.hec_endpoint}")
+    else:
+        click.echo("    HEC (logs):     disabled")

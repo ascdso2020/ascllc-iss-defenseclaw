@@ -30,6 +30,8 @@ type HealthSnapshot struct {
 	Watcher   SubsystemHealth `json:"watcher"`
 	API       SubsystemHealth `json:"api"`
 	Guardrail SubsystemHealth `json:"guardrail"`
+	Telemetry SubsystemHealth `json:"telemetry"`
+	Splunk    SubsystemHealth `json:"splunk"`
 }
 
 type SidecarHealth struct {
@@ -38,17 +40,22 @@ type SidecarHealth struct {
 	watcher   SubsystemHealth
 	api       SubsystemHealth
 	guardrail SubsystemHealth
+	telemetry SubsystemHealth
+	splunk    SubsystemHealth
 	startedAt time.Time
 }
 
 func NewSidecarHealth() *SidecarHealth {
 	now := time.Now()
 	initial := SubsystemHealth{State: StateStarting, Since: now}
+	disabled := SubsystemHealth{State: StateDisabled, Since: now}
 	return &SidecarHealth{
 		gateway:   initial,
 		watcher:   initial,
 		api:       initial,
-		guardrail: SubsystemHealth{State: StateDisabled, Since: now},
+		guardrail: disabled,
+		telemetry: disabled,
+		splunk:    disabled,
 		startedAt: now,
 	}
 }
@@ -97,6 +104,28 @@ func (h *SidecarHealth) SetGuardrail(state SubsystemState, lastErr string, detai
 	}
 }
 
+func (h *SidecarHealth) SetTelemetry(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.telemetry = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+}
+
+func (h *SidecarHealth) SetSplunk(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.splunk = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+}
+
 func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -107,5 +136,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Watcher:   h.watcher,
 		API:       h.api,
 		Guardrail: h.guardrail,
+		Telemetry: h.telemetry,
+		Splunk:    h.splunk,
 	}
 }

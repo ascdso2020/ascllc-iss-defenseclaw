@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -52,6 +54,7 @@ Run without arguments to start the sidecar daemon.`,
 		}
 
 		auditLog = audit.NewLogger(auditStore)
+		loadDotEnvIntoOS(filepath.Join(cfg.DataDir, ".env"))
 		initSplunkForwarder()
 		initOTelProvider()
 		return nil
@@ -92,6 +95,36 @@ func initOTelProvider() {
 
 	otelProvider = p
 	auditLog.SetOTelProvider(p)
+}
+
+// loadDotEnvIntoOS reads KEY=VALUE pairs from path and sets them as
+// environment variables unless already present. This ensures secrets
+// persisted by "defenseclaw setup splunk" (e.g. SPLUNK_ACCESS_TOKEN)
+// are available to the OTel provider and Splunk HEC forwarder when
+// the sidecar runs as a daemon without the user's shell environment.
+func loadDotEnvIntoOS(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
+			v = v[1 : len(v)-1]
+		}
+		if k != "" && os.Getenv(k) == "" {
+			os.Setenv(k, v)
+		}
+	}
 }
 
 func initSplunkForwarder() {

@@ -24,8 +24,13 @@ def generate_litellm_config(
     port: int,
     device_key_file: str,
 ) -> dict[str, Any]:
-    """Build the LiteLLM proxy config dict."""
-    master_key = _derive_master_key(device_key_file)
+    """Build the LiteLLM proxy config dict.
+
+    master_key is passed via the LITELLM_MASTER_KEY env var (set by
+    the Go sidecar in buildEnv) rather than in general_settings so that
+    LiteLLM >=1.80 does not require a PostgreSQL database for key
+    validation.
+    """
     return {
         "model_list": [
             {
@@ -40,9 +45,7 @@ def generate_litellm_config(
         "litellm_settings": {
             "drop_params": True,
         },
-        "general_settings": {
-            "master_key": master_key,
-        },
+        "general_settings": {},
         "router_settings": {
             "num_retries": 2,
             "retry_after": 0,

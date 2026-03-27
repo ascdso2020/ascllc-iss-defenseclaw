@@ -3,6 +3,7 @@ package gateway
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"net/http"
@@ -183,6 +184,7 @@ func (l *LiteLLMProcess) buildEnv() []string {
 		"DEFENSECLAW_SCANNER_MODE":    true,
 		"DEFENSECLAW_API_PORT":        true,
 		"DEFENSECLAW_DATA_DIR":        true,
+		"LITELLM_MASTER_KEY":          true,
 	}
 	filtered := make([]string, 0, len(env)+6)
 	for _, e := range env {
@@ -201,6 +203,10 @@ func (l *LiteLLMProcess) buildEnv() []string {
 	}
 	if l.dataDir != "" {
 		filtered = append(filtered, "DEFENSECLAW_DATA_DIR="+l.dataDir)
+	}
+
+	if mk := l.deriveMasterKey(); mk != "" {
+		filtered = append(filtered, "LITELLM_MASTER_KEY="+mk)
 	}
 
 	if l.cfg.ScannerMode == "remote" || l.cfg.ScannerMode == "both" {
@@ -316,6 +322,11 @@ func (l *LiteLLMProcess) verifyProxyExtras(binary string) error {
 // resolvePython reads the shebang of the litellm entry-point script to find
 // which Python interpreter it uses, so we can check imports against the
 // correct environment.
+//
+// Handles two common pip entry-point formats:
+//   1. Direct:   #!/path/to/python  (or #!/usr/bin/env python3)
+//   2. Polyglot: #!/bin/sh on line 1, then '''exec' '/path/to/python' ...
+//      on line 2 (used by newer setuptools/pip).
 func (l *LiteLLMProcess) resolvePython(binary string) string {
 	f, err := os.Open(binary)
 	if err != nil {
@@ -324,18 +335,59 @@ func (l *LiteLLMProcess) resolvePython(binary string) string {
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		return ""
+	}
+	line := scanner.Text()
+	if !strings.HasPrefix(line, "#!") {
+		return ""
+	}
+
+	shebang := strings.TrimSpace(strings.TrimPrefix(line, "#!"))
+	parts := strings.Fields(shebang)
+	last := ""
+	if len(parts) > 0 {
+		last = parts[len(parts)-1]
+	}
+
+	if last != "sh" && last != "/bin/sh" && last != "/usr/bin/env" {
+		return last
+	}
+
+	// Polyglot wrapper: line 2 looks like  '''exec' '/path/to/python' "$0" "$@"
+	// Extract all single-quoted tokens and return the first absolute path.
 	if scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "#!") {
-			shebang := strings.TrimPrefix(line, "#!")
-			shebang = strings.TrimSpace(shebang)
-			parts := strings.Fields(shebang)
-			if len(parts) > 0 {
-				return parts[len(parts)-1] // last token handles "#!/usr/bin/env python3"
+		line2 := scanner.Text()
+		if strings.Contains(line2, "exec") {
+			for _, p := range extractSingleQuoted(line2) {
+				if strings.HasPrefix(p, "/") {
+					return p
+				}
 			}
 		}
 	}
 	return ""
+}
+
+// extractSingleQuoted returns all non-empty single-quoted strings from s.
+func extractSingleQuoted(s string) []string {
+	var out []string
+	for {
+		start := strings.IndexByte(s, '\'')
+		if start < 0 {
+			break
+		}
+		s = s[start+1:]
+		end := strings.IndexByte(s, '\'')
+		if end < 0 {
+			break
+		}
+		if end > 0 {
+			out = append(out, s[:end])
+		}
+		s = s[end+1:]
+	}
+	return out
 }
 
 func (l *LiteLLMProcess) findBinary() (string, error) {
@@ -356,6 +408,26 @@ func (l *LiteLLMProcess) findBinary() (string, error) {
 	}
 
 	return "", fmt.Errorf("litellm binary not found — install with: uv tool install 'litellm[proxy]'")
+}
+
+// deriveMasterKey produces a deterministic master key from the device key
+// file, matching the Python _derive_master_key() in guardrail.py.
+// The key is passed as LITELLM_MASTER_KEY so LiteLLM accepts it without
+// requiring a database for virtual key validation.
+func (l *LiteLLMProcess) deriveMasterKey() string {
+	keyFile := filepath.Join(l.dataDir, "device.key")
+	if l.dataDir == "" {
+		keyFile = filepath.Join(l.cfg.GuardrailDir, "device.key")
+	}
+	data, err := os.ReadFile(keyFile)
+	if err != nil {
+		return ""
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256(data))
+	if len(digest) > 16 {
+		digest = digest[:16]
+	}
+	return "sk-dc-" + digest
 }
 
 // loadDotEnv reads a KEY=VALUE file (one per line).  Blank lines and

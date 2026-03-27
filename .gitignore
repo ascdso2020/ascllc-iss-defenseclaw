@@ -42,6 +42,8 @@ cli/defenseclaw/_data/
 /defenseclaw-*
 /custom-scanner
 
+# Collector builder output
+
 # Node.js
 node_modules/
 

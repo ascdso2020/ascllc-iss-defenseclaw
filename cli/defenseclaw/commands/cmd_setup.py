@@ -5,7 +5,10 @@ Mirrors internal/cli/setup.go.
 
 from __future__ import annotations
 
+import json as _json
 import os
+import shutil
+import socket
 import subprocess
 
 import click
@@ -417,6 +420,10 @@ def setup_gateway(
             else:
                 click.echo("error: failed to fetch token from SSM", err=True)
                 raise SystemExit(1)
+        elif not gw.token:
+            detected = _detect_openclaw_gateway_token(app.cfg.claw.config_file)
+            if detected:
+                gw.token = detected
     elif remote:
         _interactive_gateway_remote(gw)
     else:
@@ -479,6 +486,21 @@ def _interactive_gateway_remote(gw) -> None:
 
     if not gw.token:
         click.echo("  warning: no token set — sidecar will fail to connect to a remote gateway", err=True)
+
+
+def _detect_openclaw_gateway_token(openclaw_config_file: str) -> str:
+    """Read the gateway auth token from openclaw.json (gateway.auth.token)."""
+    from pathlib import Path
+
+    path = openclaw_config_file
+    if path.startswith("~/"):
+        path = str(Path.home() / path[2:])
+    try:
+        with open(path) as f:
+            cfg = _json.load(f)
+        return cfg.get("gateway", {}).get("auth", {}).get("token", "")
+    except (OSError, ValueError, KeyError):
+        return ""
 
 
 def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None:
@@ -1306,4 +1328,559 @@ def _print_gateway_summary(gw) -> None:
         click.echo("  Start the sidecar with:")
         click.echo("    defenseclaw-gateway")
         click.echo("  (local mode — ensure OpenClaw is running on this machine)")
+    click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup splunk
+# ---------------------------------------------------------------------------
+
+_SPLUNK_O11Y_INGEST_TEMPLATE = "ingest.{realm}.observability.splunkcloud.com"
+
+_SPLUNK_LOCAL_HEC_DEFAULTS = {
+    "hec_endpoint": "http://127.0.0.1:8088/services/collector/event",
+    "index": "defenseclaw_local",
+    "source": "defenseclaw",
+    "sourcetype": "defenseclaw:json",
+}
+
+
+@setup.command("splunk")
+@click.option("--o11y", "enable_o11y", is_flag=True, default=False,
+              help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
+@click.option("--logs", "enable_logs", is_flag=True, default=False,
+              help="Enable local Splunk Enterprise via Docker (HEC logs + dashboards)")
+@click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
+@click.option("--access-token", default=None, help="Splunk O11y access token")
+@click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
+@click.option("--disable", is_flag=True, help="Disable Splunk integration(s)")
+@click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
+@pass_ctx
+def setup_splunk(
+    app: AppContext,
+    enable_o11y: bool,
+    enable_logs: bool,
+    realm: str | None,
+    access_token: str | None,
+    app_name: str | None,
+    disable: bool,
+    non_interactive: bool,
+) -> None:
+    """Configure Splunk integration for DefenseClaw.
+
+    Two independent pipelines are available:
+
+    \b
+      --o11y   Splunk Observability Cloud (traces + metrics via OTLP HTTP)
+               No local infrastructure needed. Requires a Splunk access token.
+    \b
+      --logs   Local Splunk Enterprise (Docker, HEC logs + dashboards)
+               Spins up a local Splunk container. Requires Docker.
+
+    Both can run simultaneously. Without flags, runs an interactive wizard.
+    """
+    if disable:
+        _disable_splunk(app, enable_o11y, enable_logs, non_interactive)
+        return
+
+    if not enable_o11y and not enable_logs and not non_interactive:
+        _interactive_splunk_setup(app, realm, access_token, app_name)
+        return
+
+    if not enable_o11y and not enable_logs and non_interactive:
+        click.echo("  error: specify --o11y, --logs, or both with --non-interactive", err=True)
+        raise SystemExit(1)
+
+    if enable_o11y:
+        _setup_o11y(app, realm or "us1", access_token, app_name or "defenseclaw",
+                    non_interactive=non_interactive)
+
+    if enable_logs:
+        _setup_logs(app, non_interactive=non_interactive)
+
+    app.cfg.save()
+    click.echo("  Config saved to ~/.defenseclaw/config.yaml")
+    click.echo()
+    _print_splunk_status(app)
+    _print_splunk_next_steps(enable_o11y, enable_logs)
+
+    if app.logger:
+        parts: list[str] = []
+        if enable_o11y:
+            parts.append("o11y=enabled")
+        if enable_logs:
+            parts.append("logs=enabled")
+        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+
+
+# ---------------------------------------------------------------------------
+# Interactive wizard
+# ---------------------------------------------------------------------------
+
+def _interactive_splunk_setup(
+    app: AppContext,
+    realm: str | None,
+    access_token: str | None,
+    app_name: str | None,
+) -> None:
+    click.echo()
+    click.echo("  Splunk Integration Setup")
+    click.echo("  ────────────────────────")
+    click.echo()
+    click.echo("  DefenseClaw supports two Splunk pipelines. You can enable one or both.")
+    click.echo()
+    click.echo("  1. Splunk Observability Cloud (O11y)")
+    click.echo("     Sends traces + metrics + logs via OTLP HTTP directly to Splunk cloud.")
+    click.echo("     No local infrastructure needed. Requires a Splunk O11y access token.")
+    click.echo()
+    click.echo("  2. Local Splunk Enterprise (Logs)")
+    click.echo("     Spins up a local Splunk container via Docker. Audit events are sent")
+    click.echo("     via HEC. Includes pre-built dashboards for DefenseClaw.")
+    click.echo("     Requires Docker.")
+    click.echo()
+
+    did_o11y = False
+    did_logs = False
+
+    if click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False):
+        _interactive_o11y(app, realm, access_token, app_name)
+        did_o11y = True
+        click.echo()
+
+    if click.confirm("  Enable local Splunk Enterprise (Docker, HEC logs)?", default=False):
+        _interactive_logs(app)
+        did_logs = True
+
+    if not did_o11y and not did_logs:
+        click.echo()
+        click.echo("  No Splunk pipelines enabled. Run again to configure.")
+        return
+
+    app.cfg.save()
+    click.echo()
+    click.echo("  Config saved to ~/.defenseclaw/config.yaml")
+    click.echo()
+    _print_splunk_status(app)
+    _print_splunk_next_steps(did_o11y, did_logs)
+
+    if app.logger:
+        parts = []
+        if did_o11y:
+            parts.append("o11y=enabled")
+        if did_logs:
+            parts.append("logs=enabled")
+        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+
+
+def _interactive_o11y(
+    app: AppContext,
+    realm: str | None,
+    access_token: str | None,
+    app_name: str | None,
+) -> None:
+    click.echo()
+    click.echo("  Splunk Observability Cloud")
+    click.echo("  ──────────────────────────")
+    click.echo()
+
+    realm = click.prompt("  Realm (e.g. us1, us0, eu0)", default=realm or "us1")
+    access_token = _prompt_splunk_token(access_token)
+    app_name = click.prompt("  Service name", default=app_name or "defenseclaw")
+
+    click.echo()
+    click.echo("  Signals to export:")
+    enable_traces = click.confirm("    Enable traces?", default=True)
+    enable_metrics = click.confirm("    Enable metrics?", default=True)
+    enable_logs = click.confirm("    Enable logs (to Log Observer)?", default=False)
+
+    _apply_o11y_config(
+        app, realm, access_token, app_name,
+        enable_traces=enable_traces,
+        enable_metrics=enable_metrics,
+        enable_logs=enable_logs,
+    )
+
+
+def _prompt_splunk_token(current: str | None) -> str:
+    env_val = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
+    if current:
+        hint = _mask(current)
+    elif env_val:
+        hint = f"from env: {_mask(env_val)}"
+    else:
+        hint = "(not set)"
+
+    val = click.prompt(f"  Access token [{hint}]", default="", show_default=False, hide_input=True)
+    if val:
+        return val
+    return current or env_val
+
+
+def _interactive_logs(app: AppContext) -> None:
+    click.echo()
+    click.echo("  Local Splunk Enterprise")
+    click.echo("  ───────────────────────")
+    click.echo()
+
+    ok = _preflight_docker()
+    if not ok:
+        return
+
+    index = click.prompt("  Index name", default="defenseclaw_local")
+    source = click.prompt("  Source", default="defenseclaw")
+    sourcetype = click.prompt("  Sourcetype", default="defenseclaw:json")
+
+    _apply_logs_config(app, index=index, source=source, sourcetype=sourcetype,
+                       bootstrap_bridge=True)
+
+
+# ---------------------------------------------------------------------------
+# Non-interactive setup helpers
+# ---------------------------------------------------------------------------
+
+def _setup_o11y(
+    app: AppContext,
+    realm: str,
+    access_token: str | None,
+    app_name: str,
+    *,
+    non_interactive: bool,
+) -> None:
+    token = access_token or os.environ.get("SPLUNK_ACCESS_TOKEN", "")
+    if not token and non_interactive:
+        click.echo("  error: --access-token required (or set SPLUNK_ACCESS_TOKEN env var)", err=True)
+        raise SystemExit(1)
+    if not token:
+        token = _prompt_splunk_token(None)
+    if not token:
+        click.echo("  error: access token is required for Splunk O11y", err=True)
+        raise SystemExit(1)
+
+    _apply_o11y_config(
+        app, realm, token, app_name,
+        enable_traces=True,
+        enable_metrics=True,
+        enable_logs=False,
+    )
+    click.echo(f"  Splunk O11y configured (realm={realm})")
+
+
+def _setup_logs(app: AppContext, *, non_interactive: bool) -> None:
+    ok = _preflight_docker()
+    if not ok:
+        if non_interactive:
+            click.echo("  error: Docker is required for --logs", err=True)
+            raise SystemExit(1)
+        return
+
+    _apply_logs_config(
+        app,
+        index="defenseclaw_local",
+        source="defenseclaw",
+        sourcetype="defenseclaw:json",
+        bootstrap_bridge=True,
+    )
+    click.echo("  Local Splunk Enterprise configured")
+
+
+# ---------------------------------------------------------------------------
+# Config writers
+# ---------------------------------------------------------------------------
+
+def _apply_o11y_config(
+    app: AppContext,
+    realm: str,
+    access_token: str,
+    app_name: str,
+    *,
+    enable_traces: bool,
+    enable_metrics: bool,
+    enable_logs: bool,
+) -> None:
+    ingest = _SPLUNK_O11Y_INGEST_TEMPLATE.format(realm=realm)
+    otel = app.cfg.otel
+
+    otel.enabled = True
+    otel.headers["X-SF-Token"] = "${SPLUNK_ACCESS_TOKEN}"
+
+    otel.traces.enabled = enable_traces
+    if enable_traces:
+        otel.traces.endpoint = ingest
+        otel.traces.protocol = "http"
+        otel.traces.url_path = "/v2/trace/otlp"
+
+    otel.metrics.enabled = enable_metrics
+    if enable_metrics:
+        otel.metrics.endpoint = ingest
+        otel.metrics.protocol = "http"
+        otel.metrics.url_path = "/v2/datapoint/otlp"
+
+    otel.logs.enabled = enable_logs
+    if enable_logs:
+        otel.logs.endpoint = ingest
+        otel.logs.protocol = "http"
+        otel.logs.url_path = "/v1/log/otlp"
+
+    _save_secret_to_dotenv("SPLUNK_ACCESS_TOKEN", access_token, app.cfg.data_dir)
+    _save_secret_to_dotenv("OTEL_SERVICE_NAME", app_name, app.cfg.data_dir)
+
+
+def _apply_logs_config(
+    app: AppContext,
+    *,
+    index: str,
+    source: str,
+    sourcetype: str,
+    bootstrap_bridge: bool,
+) -> None:
+    contract: dict[str, str] | None = None
+    if bootstrap_bridge:
+        contract = _bootstrap_bridge(app.cfg.data_dir)
+
+    sc = app.cfg.splunk
+    sc.enabled = True
+    sc.hec_endpoint = (contract or {}).get("hec_url", _SPLUNK_LOCAL_HEC_DEFAULTS["hec_endpoint"])
+    sc.index = index
+    sc.source = source
+    sc.sourcetype = sourcetype
+    sc.verify_tls = False
+    sc.batch_size = 50
+    sc.flush_interval_s = 5
+
+    hec_token = (contract or {}).get("hec_token", "")
+    if hec_token:
+        sc.hec_token = hec_token
+        _save_secret_to_dotenv("DEFENSECLAW_SPLUNK_HEC_TOKEN", hec_token, app.cfg.data_dir)
+
+
+# ---------------------------------------------------------------------------
+# Bridge bootstrap
+# ---------------------------------------------------------------------------
+
+def _resolve_bridge_bin(data_dir: str) -> str | None:
+    """Locate the splunk-claw-bridge script. Checks ~/.defenseclaw/splunk-bridge/
+    first (seeded by init), then the vendored bundles/ in the repo."""
+    candidates = [
+        os.path.join(data_dir, "splunk-bridge", "bin", "splunk-claw-bridge"),
+    ]
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(here)))
+        candidates.append(
+            os.path.join(repo_root, "bundles", "splunk_local_bridge", "bin", "splunk-claw-bridge"),
+        )
+    except Exception:
+        pass
+
+    for c in candidates:
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
+
+
+def _bootstrap_bridge(data_dir: str) -> dict[str, str] | None:
+    """Start the local Splunk bridge and return the connection contract."""
+    bridge = _resolve_bridge_bin(data_dir)
+    if not bridge:
+        click.echo("  Splunk bridge runtime not found.")
+        click.echo("  Run 'defenseclaw init' to seed it, or install from source.")
+        return None
+
+    click.echo("  Starting local Splunk (this takes ~2 minutes)...")
+    try:
+        result = subprocess.run(
+            [bridge, "up", "--output", "json"],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            click.echo(f"  Bridge startup failed (exit {result.returncode})")
+            err = (result.stderr or result.stdout or "").strip()
+            for line in err.splitlines()[:5]:
+                click.echo(f"    {line}")
+            return None
+
+        contract = _json.loads(result.stdout.strip())
+        click.echo("  Local Splunk is ready")
+        web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
+        click.echo(f"    Web UI: {web_url}")
+        username = contract.get("username", "")
+        if username:
+            click.echo(f"    Username: {username}")
+        return contract
+    except subprocess.TimeoutExpired:
+        click.echo("  Bridge startup timed out after 5 minutes")
+        return None
+    except (_json.JSONDecodeError, OSError) as exc:
+        click.echo(f"  Bridge startup error: {exc}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Docker pre-flight
+# ---------------------------------------------------------------------------
+
+def _preflight_docker() -> bool:
+    """Check Docker is installed and running. Return True if OK."""
+    click.echo("  Pre-flight checks:")
+    docker = shutil.which("docker")
+    if not docker:
+        click.echo("    Docker installed... NOT FOUND")
+        click.echo("    Install Docker: https://docs.docker.com/get-docker/")
+        return False
+    click.echo("    Docker installed... ok")
+
+    try:
+        result = subprocess.run(
+            ["docker", "info"], capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode != 0:
+            click.echo("    Docker daemon running... NOT RUNNING")
+            click.echo("    Start Docker and try again.")
+            return False
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        click.echo("    Docker daemon running... NOT RUNNING")
+        return False
+    click.echo("    Docker daemon running... ok")
+
+    for port, label in [(8000, "Splunk Web"), (8088, "HEC")]:
+        if _port_in_use(port):
+            click.echo(f"    Port {port} ({label})... IN USE")
+            click.echo(f"    Free port {port} or stop the existing Splunk instance.")
+            return False
+        click.echo(f"    Port {port} ({label})... available")
+
+    return True
+
+
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Disable
+# ---------------------------------------------------------------------------
+
+def _disable_splunk(
+    app: AppContext,
+    o11y_only: bool,
+    logs_only: bool,
+    non_interactive: bool,
+) -> None:
+    disable_both = not o11y_only and not logs_only
+
+    click.echo()
+    click.echo("  Disabling Splunk integration...")
+
+    if disable_both or o11y_only:
+        app.cfg.otel.enabled = False
+        click.echo("    Splunk O11y (OTLP): disabled")
+
+    if disable_both or logs_only:
+        app.cfg.splunk.enabled = False
+        click.echo("    Splunk Enterprise (HEC): disabled")
+        _stop_bridge(app.cfg.data_dir)
+
+    app.cfg.save()
+    click.echo("  Config saved")
+    click.echo()
+
+    if app.logger:
+        parts = []
+        if disable_both or o11y_only:
+            parts.append("o11y=disabled")
+        if disable_both or logs_only:
+            parts.append("logs=disabled")
+        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+
+
+def _stop_bridge(data_dir: str) -> None:
+    bridge = _resolve_bridge_bin(data_dir)
+    if not bridge:
+        return
+    try:
+        subprocess.run(
+            [bridge, "down"], capture_output=True, text=True, timeout=60,
+        )
+        click.echo("    Local Splunk container stopped")
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        click.echo("    Could not stop local Splunk container (may not be running)")
+
+
+# ---------------------------------------------------------------------------
+# Secret storage
+# ---------------------------------------------------------------------------
+
+def _save_secret_to_dotenv(key: str, value: str, data_dir: str) -> None:
+    """Write a secret to ~/.defenseclaw/.env (mode 0600)."""
+    if not value:
+        return
+    dotenv_path = os.path.join(data_dir, ".env")
+    existing = _load_dotenv(dotenv_path)
+    existing[key] = value
+    _write_dotenv(dotenv_path, existing)
+
+
+# ---------------------------------------------------------------------------
+# Status display
+# ---------------------------------------------------------------------------
+
+def _print_splunk_status(app: AppContext) -> None:
+    otel = app.cfg.otel
+    sc = app.cfg.splunk
+
+    if otel.enabled:
+        click.echo("  Splunk Observability (OTLP):")
+        click.echo("    Status:      enabled")
+        if otel.traces.endpoint:
+            realm = otel.traces.endpoint.replace("ingest.", "").replace(".observability.splunkcloud.com", "")
+            click.echo(f"    Realm:       {realm}")
+        if otel.traces.enabled:
+            click.echo(f"    Traces:      {otel.traces.endpoint}{otel.traces.url_path}")
+        else:
+            click.echo("    Traces:      disabled")
+        if otel.metrics.enabled:
+            click.echo(f"    Metrics:     {otel.metrics.endpoint}{otel.metrics.url_path}")
+        else:
+            click.echo("    Metrics:     disabled")
+        if otel.logs.enabled:
+            click.echo(f"    Logs:        {otel.logs.endpoint}{otel.logs.url_path}")
+        else:
+            click.echo("    Logs:        disabled")
+        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
+        dotenv = _load_dotenv(dotenv_path)
+        svc = dotenv.get("OTEL_SERVICE_NAME", os.environ.get("OTEL_SERVICE_NAME", "defenseclaw"))
+        click.echo(f"    Service:     {svc}")
+        click.echo()
+
+    if sc.enabled:
+        click.echo("  Splunk Enterprise (HEC):")
+        click.echo("    Status:      enabled")
+        click.echo(f"    HEC:         {sc.hec_endpoint}")
+        click.echo(f"    Index:       {sc.index}")
+        click.echo(f"    Source:      {sc.source}")
+        click.echo(f"    Sourcetype:  {sc.sourcetype}")
+        click.echo()
+
+    if not otel.enabled and not sc.enabled:
+        click.echo("  No Splunk integrations are currently enabled.")
+        click.echo()
+
+
+def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
+    click.echo("  Next steps:")
+    click.echo("    1. Start (or restart) the DefenseClaw sidecar:")
+    click.echo("       defenseclaw-gateway restart")
+    if did_logs:
+        click.echo("    2. Open local Splunk Web at http://127.0.0.1:8000")
+    click.echo()
+    click.echo("  To disable:")
+    if did_o11y and did_logs:
+        click.echo("    defenseclaw setup splunk --disable            # both")
+        click.echo("    defenseclaw setup splunk --disable --o11y     # O11y only")
+        click.echo("    defenseclaw setup splunk --disable --logs     # local only")
+    elif did_o11y:
+        click.echo("    defenseclaw setup splunk --disable --o11y")
+    elif did_logs:
+        click.echo("    defenseclaw setup splunk --disable --logs")
     click.echo()

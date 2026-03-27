@@ -162,10 +162,16 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 	var exporter sdktrace.SpanExporter
 	var err error
 
-	if cfg.Protocol == "http" {
+	endpoint := resolveValue(cfg.Traces.Endpoint, cfg.Endpoint)
+	protocol := resolveValue(cfg.Traces.Protocol, cfg.Protocol)
+
+	if protocol == "http" {
 		opts := []tracehttp.Option{
-			tracehttp.WithEndpoint(cfg.Endpoint),
+			tracehttp.WithEndpoint(endpoint),
 			tracehttp.WithHeaders(headers),
+		}
+		if cfg.Traces.URLPath != "" {
+			opts = append(opts, tracehttp.WithURLPath(cfg.Traces.URLPath))
 		}
 		if cfg.TLS.Insecure {
 			opts = append(opts, tracehttp.WithInsecure())
@@ -180,7 +186,7 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 		exporter, err = tracehttp.New(ctx, opts...)
 	} else {
 		opts := []tracegrpc.Option{
-			tracegrpc.WithEndpoint(cfg.Endpoint),
+			tracegrpc.WithEndpoint(endpoint),
 			tracegrpc.WithHeaders(headers),
 		}
 		if cfg.TLS.Insecure {
@@ -217,10 +223,16 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 	var exporter sdklog.Exporter
 	var err error
 
-	if cfg.Protocol == "http" {
+	endpoint := resolveValue(cfg.Logs.Endpoint, cfg.Endpoint)
+	protocol := resolveValue(cfg.Logs.Protocol, cfg.Protocol)
+
+	if protocol == "http" {
 		opts := []loghttp.Option{
-			loghttp.WithEndpoint(cfg.Endpoint),
+			loghttp.WithEndpoint(endpoint),
 			loghttp.WithHeaders(headers),
+		}
+		if cfg.Logs.URLPath != "" {
+			opts = append(opts, loghttp.WithURLPath(cfg.Logs.URLPath))
 		}
 		if cfg.TLS.Insecure {
 			opts = append(opts, loghttp.WithInsecure())
@@ -235,7 +247,7 @@ func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 		exporter, err = loghttp.New(ctx, opts...)
 	} else {
 		opts := []loggrpc.Option{
-			loggrpc.WithEndpoint(cfg.Endpoint),
+			loggrpc.WithEndpoint(endpoint),
 			loggrpc.WithHeaders(headers),
 		}
 		if cfg.TLS.Insecure {
@@ -269,10 +281,16 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 	var exporter sdkmetric.Exporter
 	var err error
 
-	if cfg.Protocol == "http" {
+	endpoint := resolveValue(cfg.Metrics.Endpoint, cfg.Endpoint)
+	protocol := resolveValue(cfg.Metrics.Protocol, cfg.Protocol)
+
+	if protocol == "http" {
 		opts := []metrichttp.Option{
-			metrichttp.WithEndpoint(cfg.Endpoint),
+			metrichttp.WithEndpoint(endpoint),
 			metrichttp.WithHeaders(headers),
+		}
+		if cfg.Metrics.URLPath != "" {
+			opts = append(opts, metrichttp.WithURLPath(cfg.Metrics.URLPath))
 		}
 		if cfg.TLS.Insecure {
 			opts = append(opts, metrichttp.WithInsecure())
@@ -287,7 +305,7 @@ func newMeterProvider(ctx context.Context, cfg config.OTelConfig, res *resource.
 		exporter, err = metrichttp.New(ctx, opts...)
 	} else {
 		opts := []metricgrpc.Option{
-			metricgrpc.WithEndpoint(cfg.Endpoint),
+			metricgrpc.WithEndpoint(endpoint),
 			metricgrpc.WithHeaders(headers),
 		}
 		if cfg.TLS.Insecure {
@@ -345,9 +363,18 @@ func buildSampler(name, arg string) sdktrace.Sampler {
 	}
 }
 
-// expandHeaders substitutes ${ENV_VAR} references in header values.
+// resolveValue returns the signal-level override if non-empty, otherwise the global value.
+func resolveValue(signal, global string) string {
+	if signal != "" {
+		return signal
+	}
+	return global
+}
+
+// expandHeaders substitutes ${ENV_VAR} references in header values
+// and auto-injects X-SF-Token from SPLUNK_ACCESS_TOKEN when present.
 func expandHeaders(headers map[string]string) map[string]string {
-	out := make(map[string]string, len(headers))
+	out := make(map[string]string, len(headers)+1)
 	for k, v := range headers {
 		out[k] = os.Expand(v, func(key string) string {
 			if strings.HasPrefix(key, "{") && strings.HasSuffix(key, "}") {
@@ -355,6 +382,11 @@ func expandHeaders(headers map[string]string) map[string]string {
 			}
 			return os.Getenv(key)
 		})
+	}
+	if _, ok := out["X-SF-Token"]; !ok {
+		if tok := os.Getenv("SPLUNK_ACCESS_TOKEN"); tok != "" {
+			out["X-SF-Token"] = tok
+		}
 	}
 	return out
 }
