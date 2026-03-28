@@ -32,6 +32,7 @@ type RequestImpl = typeof httpRequest;
 
 interface ClientOptions {
   baseUrl?: string;
+  token?: string;
   timeoutMs?: number;
   requestImpl?: RequestImpl;
 }
@@ -45,11 +46,14 @@ interface ApiResponse<T> {
 
 export class DaemonClient {
   private readonly baseUrl: string;
+  private readonly token: string;
   private readonly timeoutMs: number;
   private readonly requestImpl: RequestImpl;
 
   constructor(opts?: ClientOptions) {
-    this.baseUrl = opts?.baseUrl ?? loadSidecarConfig().baseUrl;
+    const cfg = loadSidecarConfig();
+    this.baseUrl = opts?.baseUrl ?? cfg.baseUrl;
+    this.token = opts?.token ?? cfg.token;
     this.timeoutMs = opts?.timeoutMs ?? REQUEST_TIMEOUT_MS;
     this.requestImpl = opts?.requestImpl ?? httpRequest;
   }
@@ -151,6 +155,18 @@ export class DaemonClient {
       const url = new URL(path, this.baseUrl);
       const payload = body !== undefined ? JSON.stringify(body) : undefined;
 
+      const headers: Record<string, string | number> = {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "X-DefenseClaw-Client": "openclaw-plugin",
+      };
+      if (this.token) {
+        headers["Authorization"] = `Bearer ${this.token}`;
+      }
+      if (payload !== undefined) {
+        headers["Content-Length"] = Buffer.byteLength(payload);
+      }
+
       const req = this.requestImpl(
         {
           hostname: url.hostname,
@@ -158,14 +174,7 @@ export class DaemonClient {
           path: url.pathname + url.search,
           method,
           timeout: this.timeoutMs,
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-            "X-DefenseClaw-Client": "openclaw-plugin",
-            ...(payload !== undefined
-              ? { "Content-Length": Buffer.byteLength(payload) }
-              : {}),
-          },
+          headers,
         },
         (res) => {
           const chunks: Buffer[] = [];

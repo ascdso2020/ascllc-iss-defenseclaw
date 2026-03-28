@@ -27,6 +27,7 @@ import click
 import yaml
 
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.paths import bundled_policies_dir, bundled_rego_dir
 
 SEVERITIES = ["critical", "high", "medium", "low", "info"]
 RUNTIME_CHOICES = ["disable", "enable"]
@@ -41,15 +42,12 @@ def _policies_dir(app: AppContext) -> str:
 
 
 def _bundled_policies_dir() -> str:
-    """Return path to the bundled policies/ directory shipped with the repo."""
-    here = Path(__file__).resolve()
-    # cli/defenseclaw/commands/cmd_policy.py -> repo root / policies
-    repo_root = here.parent.parent.parent.parent
-    return str(repo_root / "policies")
+    """Return path to the bundled policies/ directory (wheel _data/ or repo root)."""
+    return str(bundled_policies_dir())
 
 
 def _rego_dir() -> str:
-    return os.path.join(_bundled_policies_dir(), "rego")
+    return str(bundled_rego_dir())
 
 
 def _ensure_policies_dir(app: AppContext) -> str:

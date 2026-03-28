@@ -28,6 +28,7 @@ import subprocess
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.paths import bundled_rego_dir, bundled_splunk_bridge_dir
 
 
 @click.command("init")
@@ -149,12 +150,7 @@ def init_cmd(app: AppContext, skip_install: bool, enable_guardrail: bool) -> Non
 
 def _seed_rego_policies(policy_dir: str) -> None:
     """Copy bundled Rego policies into the user's policy_dir if not already present."""
-    from pathlib import Path
-
-    pkg_dir = Path(__file__).resolve().parent.parent
-    bundled_rego = pkg_dir / "_data" / "policies" / "rego"
-    if not bundled_rego.is_dir():
-        bundled_rego = pkg_dir.parent.parent / "policies" / "rego"
+    bundled_rego = bundled_rego_dir()
     if not bundled_rego.is_dir():
         return
 
@@ -190,19 +186,7 @@ def _seed_splunk_bridge(data_dir: str) -> None:
 
 def _resolve_splunk_bridge_bundle():
     """Resolve the vendored local Splunk runtime from package data or source tree."""
-    from pathlib import Path
-
-    pkg_dir = Path(__file__).resolve().parent.parent
-    candidates = [
-        pkg_dir / "_data" / "splunk_local_bridge",
-        pkg_dir.parent.parent / "bundles" / "splunk_local_bridge",
-    ]
-
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-
-    return candidates[0]
+    return bundled_splunk_bridge_dir()
 
 
 def _install_scanners(cfg, logger, skip: bool) -> None:

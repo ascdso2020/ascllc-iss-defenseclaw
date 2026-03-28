@@ -123,7 +123,12 @@ describe("loadSidecarConfig", () => {
     const second = loadSidecarConfig();
 
     expect(first).toBe(second);
-    expect(mockReadFileSync).toHaveBeenCalledTimes(1);
+    const callsOnFirstLoad = mockReadFileSync.mock.calls.length;
+    expect(callsOnFirstLoad).toBeGreaterThanOrEqual(1);
+
+    mockReadFileSync.mockClear();
+    loadSidecarConfig();
+    expect(mockReadFileSync).toHaveBeenCalledTimes(0);
   });
 
   it("returns fresh result after cache reset", () => {

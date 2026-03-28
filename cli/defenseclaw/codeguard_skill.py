@@ -39,6 +39,8 @@ import os
 import shutil
 from pathlib import Path
 
+from defenseclaw.paths import bundled_codeguard_dir
+
 
 def install_codeguard_skill(cfg) -> str:
     """Copy the CodeGuard skill into the OpenClaw workspace skills directory.
@@ -157,23 +159,9 @@ def _enable_codeguard_in_openclaw(openclaw_config: str) -> None:
 
 def _find_skill_source() -> str | None:
     """Locate the ``skills/codeguard/`` directory in bundled package data or repo tree."""
-    this_file = os.path.abspath(__file__)
-    cli_pkg = os.path.dirname(this_file)
-
-    bundled = os.path.join(cli_pkg, "_data", "skills", "codeguard")
-    if os.path.isdir(bundled) and os.path.isfile(os.path.join(bundled, "SKILL.md")):
-        return bundled
-
-    repo_root = os.path.dirname(os.path.dirname(cli_pkg))
-    candidates = [
-        os.path.join(repo_root, "skills", "codeguard"),
-        os.path.join(os.path.dirname(cli_pkg), "skills", "codeguard"),
-    ]
-
-    for c in candidates:
-        resolved = os.path.realpath(c)
-        if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "SKILL.md")):
-            return resolved
+    d = bundled_codeguard_dir()
+    if d.is_dir() and (d / "SKILL.md").is_file():
+        return str(d)
     return None
 
 

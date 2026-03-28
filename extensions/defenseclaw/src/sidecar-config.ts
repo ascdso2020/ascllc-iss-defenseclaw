@@ -23,25 +23,30 @@ import yaml from "js-yaml";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_API_PORT = 18970;
+const DEFAULT_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN";
 
 interface SidecarConfig {
   host: string;
   apiPort: number;
   baseUrl: string;
+  token: string;
 }
 
 let cached: SidecarConfig | undefined;
 
 /**
- * Read gateway.host and gateway.api_port from ~/.defenseclaw/config.yaml.
- * Falls back to defaults (127.0.0.1:18970) if the file is missing or
- * malformed. Result is cached for the lifetime of the process.
+ * Read gateway.host, gateway.api_port, and gateway token from
+ * ~/.defenseclaw/config.yaml. Token resolution mirrors the Go sidecar:
+ * env var (gateway.token_env, default OPENCLAW_GATEWAY_TOKEN) wins over
+ * the direct gateway.token value. Falls back to defaults if the file is
+ * missing or malformed. Result is cached for the lifetime of the process.
  */
 export function loadSidecarConfig(): SidecarConfig {
   if (cached) return cached;
 
   let host = DEFAULT_HOST;
   let apiPort = DEFAULT_API_PORT;
+  let token = "";
 
   try {
     const cfgPath = join(homedir(), ".defenseclaw", "config.yaml");
@@ -51,14 +56,54 @@ export function loadSidecarConfig(): SidecarConfig {
       if (gw && typeof gw === "object") {
         if (typeof gw["host"] === "string" && gw["host"]) host = gw["host"];
         if (typeof gw["api_port"] === "number") apiPort = gw["api_port"];
+        if (typeof gw["token"] === "string" && gw["token"]) token = gw["token"];
+        const tokenEnv =
+          typeof gw["token_env"] === "string" && gw["token_env"]
+            ? gw["token_env"]
+            : DEFAULT_TOKEN_ENV;
+        const envVal = process.env[tokenEnv];
+        if (envVal) token = envVal;
       }
     }
   } catch {
     // Config missing or unreadable — use defaults
   }
 
-  cached = { host, apiPort, baseUrl: `http://${host}:${apiPort}` };
+  if (!token) {
+    const envVal = process.env[DEFAULT_TOKEN_ENV];
+    if (envVal) token = envVal;
+  }
+
+  if (!token) {
+    token = readDotEnvToken(DEFAULT_TOKEN_ENV);
+  }
+
+  cached = { host, apiPort, baseUrl: `http://${host}:${apiPort}`, token };
   return cached;
+}
+
+/**
+ * Read a KEY=VALUE token from ~/.defenseclaw/.env.
+ * The Go sidecar loads this file into its own process env, but the
+ * OpenClaw Node.js process is separate and won't have it.
+ */
+function readDotEnvToken(key: string): string {
+  try {
+    const envPath = join(homedir(), ".defenseclaw", ".env");
+    const content = readFileSync(envPath, "utf8");
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("#") || !trimmed.includes("=")) continue;
+      const eqIdx = trimmed.indexOf("=");
+      const k = trimmed.slice(0, eqIdx).trim();
+      if (k === key) {
+        return trimmed.slice(eqIdx + 1).trim();
+      }
+    }
+  } catch {
+    // .env missing or unreadable
+  }
+  return "";
 }
 
 /** Clear cached config (for testing). */

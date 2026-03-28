@@ -30,6 +30,7 @@ import subprocess
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 
 
 @click.group()
@@ -1164,31 +1165,13 @@ def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = F
 def _find_plugin_source() -> str | None:
     """Locate the built OpenClaw plugin.
 
-    Checks the stable staging directory (~/.defenseclaw/extensions/defenseclaw)
-    first — this is where ``make plugin-install`` and future PyPI packaging
-    place the built artifacts.  Falls back to the source tree for dev
-    workflows where the plugin was built but not yet staged.
+    Checks ~/.defenseclaw/extensions/defenseclaw first (production install),
+    then the repo source tree (dev).
     """
-    dc_home = os.path.expanduser("~/.defenseclaw")
-    candidates = [
-        os.path.join(dc_home, "extensions", "defenseclaw"),
-    ]
-
-    # Dev fallback: source tree relative to this file
-    candidates.append(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "extensions", "defenseclaw"),
-    )
-    try:
-        pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        repo_root = os.path.dirname(os.path.dirname(pkg_dir))
-        candidates.append(os.path.join(repo_root, "extensions", "defenseclaw"))
-    except Exception:
-        pass
-
-    for c in candidates:
-        resolved = os.path.realpath(c)
-        if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "package.json")):
-            return resolved
+    d = bundled_extensions_dir()
+    resolved = str(d.resolve())
+    if os.path.isdir(resolved) and os.path.isfile(os.path.join(resolved, "package.json")):
+        return resolved
     return None
 
 
@@ -1786,23 +1769,8 @@ def _apply_logs_config(
 
 def _resolve_bridge_bin(data_dir: str) -> str | None:
     """Locate the splunk-claw-bridge script. Checks ~/.defenseclaw/splunk-bridge/
-    first (seeded by init), then the vendored bundles/ in the repo."""
-    candidates = [
-        os.path.join(data_dir, "splunk-bridge", "bin", "splunk-claw-bridge"),
-    ]
-    try:
-        here = os.path.dirname(os.path.abspath(__file__))
-        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(here)))
-        candidates.append(
-            os.path.join(repo_root, "bundles", "splunk_local_bridge", "bin", "splunk-claw-bridge"),
-        )
-    except Exception:
-        pass
-
-    for c in candidates:
-        if os.path.isfile(c) and os.access(c, os.X_OK):
-            return c
-    return None
+    first (seeded by init), then the bundled source."""
+    return splunk_bridge_bin(data_dir)
 
 
 def _bootstrap_bridge(data_dir: str) -> dict[str, str] | None:

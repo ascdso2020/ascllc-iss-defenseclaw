@@ -70,7 +70,9 @@ export default function (api: PluginApi) {
 
   // ─── Runtime: tool call interception ───
 
-  const SIDECAR_API = loadSidecarConfig().baseUrl;
+  const sidecarConfig = loadSidecarConfig();
+  const SIDECAR_API = sidecarConfig.baseUrl;
+  const SIDECAR_TOKEN = sidecarConfig.token;
   const INSPECT_TIMEOUT_MS = 2_000;
 
   async function inspectTool(
@@ -79,12 +81,16 @@ export default function (api: PluginApi) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), INSPECT_TIMEOUT_MS);
     try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+        "X-DefenseClaw-Client": "openclaw-plugin",
+      };
+      if (SIDECAR_TOKEN) {
+        headers["Authorization"] = `Bearer ${SIDECAR_TOKEN}`;
+      }
       const res = await fetch(`${SIDECAR_API}/api/v1/inspect/tool`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-DefenseClaw-Client": "openclaw-plugin",
-        },
+        headers,
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
