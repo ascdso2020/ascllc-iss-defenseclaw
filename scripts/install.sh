@@ -21,8 +21,8 @@
 # Installs DefenseClaw from pre-built release artifacts.
 # No Go, Node.js, or git required — only Python and uv.
 #
-#   # From GitHub release (once public):
-#   curl -LsSf https://raw.githubusercontent.com/defenseclaw/defenseclaw/main/scripts/install.sh | bash
+#   # From GitHub release:
+#   curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash
 #
 #   # From local dist/ directory (for testing):
 #   ./scripts/install.sh --local ./dist
@@ -43,8 +43,8 @@ main() {
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 readonly DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"
 readonly INSTALL_DIR="${HOME}/.local/bin"
-readonly REPO="defenseclaw/defenseclaw"
-readonly OPENCLAW_VERSION="26.3.24"
+readonly REPO="cisco-ai-defense/defenseclaw"
+readonly OPENCLAW_VERSION="2026.3.24"
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -230,7 +230,7 @@ artifact_path() {
         fi
         echo "${match}"
     else
-        echo "https://github.com/${REPO}/releases/download/v${RELEASE_VERSION}/${name}"
+        echo "https://github.com/${REPO}/releases/download/${RELEASE_VERSION}/${name}"
     fi
 }
 
@@ -250,12 +250,23 @@ fetch_artifact() {
 install_gateway() {
     step "Installing gateway"
 
-    local artifact
-    artifact="$(artifact_path "defenseclaw-gateway-${OS}-${ARCH_NORM}")"
-
     mkdir -p "${INSTALL_DIR}"
-    fetch_artifact "${artifact}" "${INSTALL_DIR}/defenseclaw-gateway"
-    chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
+
+    if [[ -n "${LOCAL_DIR}" ]]; then
+        local artifact
+        artifact="$(artifact_path "defenseclaw-gateway-${OS}-${ARCH_NORM}")"
+        cp "${artifact}" "${INSTALL_DIR}/defenseclaw-gateway"
+        chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
+    else
+        local url tmp
+        url="$(artifact_path "defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz")"
+        tmp="$(mktemp -d)"
+        fetch_artifact "${url}" "${tmp}/gateway.tar.gz"
+        tar -xzf "${tmp}/gateway.tar.gz" -C "${tmp}"
+        cp "${tmp}/defenseclaw" "${INSTALL_DIR}/defenseclaw-gateway"
+        chmod +x "${INSTALL_DIR}/defenseclaw-gateway"
+        rm -rf "${tmp}"
+    fi
 
     if [[ "${OS}" == "darwin" ]]; then
         codesign -f -s - "${INSTALL_DIR}/defenseclaw-gateway" 2>/dev/null || true
@@ -269,9 +280,6 @@ install_gateway() {
 install_python_cli() {
     step "Installing DefenseClaw CLI"
 
-    local whl
-    whl="$(artifact_path "defenseclaw-*.whl")"
-
     info "Creating Python environment..."
     uv venv "${DEFENSECLAW_VENV}" --python "${PYTHON_VERSION}" --quiet 2>/dev/null \
         || uv venv "${DEFENSECLAW_VENV}" --python 3.12 --quiet 2>/dev/null \
@@ -280,13 +288,17 @@ install_python_cli() {
 
     info "Installing from wheel..."
     if [[ -n "${LOCAL_DIR}" ]]; then
+        local whl
+        whl="$(artifact_path "defenseclaw-*.whl")"
         uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${whl}" \
             || die "Failed to install CLI from wheel"
     else
-        local tmp
+        local whl_name="defenseclaw-${RELEASE_VERSION}-py3-none-any.whl"
+        local whl_url tmp
+        whl_url="$(artifact_path "${whl_name}")"
         tmp="$(mktemp -d)"
-        fetch_artifact "${whl}" "${tmp}/defenseclaw.whl"
-        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${tmp}/defenseclaw.whl" \
+        fetch_artifact "${whl_url}" "${tmp}/${whl_name}"
+        uv pip install --python "${DEFENSECLAW_VENV}/bin/python" --quiet "${tmp}/${whl_name}" \
             || die "Failed to install CLI from wheel"
         rm -rf "${tmp}"
     fi
@@ -306,20 +318,21 @@ install_python_cli() {
 install_plugin() {
     step "Installing OpenClaw plugin"
 
-    local tarball
-    tarball="$(artifact_path "defenseclaw-plugin-*.tar.gz")"
-
     local dest="${DEFENSECLAW_HOME}/extensions/defenseclaw"
     rm -rf "${dest}"
     mkdir -p "${dest}"
 
     if [[ -n "${LOCAL_DIR}" ]]; then
+        local tarball
+        tarball="$(artifact_path "defenseclaw-plugin-*.tar.gz")"
         tar -xzf "${tarball}" -C "${dest}"
     else
-        local tmp
+        local tarball_name="defenseclaw-plugin-${RELEASE_VERSION}.tar.gz"
+        local tarball_url tmp
+        tarball_url="$(artifact_path "${tarball_name}")"
         tmp="$(mktemp -d)"
-        fetch_artifact "${tarball}" "${tmp}/plugin.tar.gz"
-        tar -xzf "${tmp}/plugin.tar.gz" -C "${dest}"
+        fetch_artifact "${tarball_url}" "${tmp}/${tarball_name}"
+        tar -xzf "${tmp}/${tarball_name}" -C "${dest}"
         rm -rf "${tmp}"
     fi
 
@@ -473,9 +486,9 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo ""
             echo "Usage:"
-            echo "  curl -LsSf <url>/install.sh | bash                # from GitHub release"
+            echo "  curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash"
             echo "  ./scripts/install.sh --local ./dist               # from local build"
-            echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
+            echo "  curl -LsSf ... | bash -s -- --yes                 # non-interactive"
             echo ""
             echo "Options:"
             echo "  --local <dir>  Install from a local dist directory"
