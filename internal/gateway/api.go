@@ -204,7 +204,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	if err := a.client.DisableSkill(ctx, req.SkillKey); err != nil {
@@ -239,7 +239,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	if err := a.client.EnableSkill(ctx, req.SkillKey); err != nil {
@@ -278,7 +278,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
@@ -315,7 +315,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), pluginGatewayMutationTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	if err := a.retryGatewayMutation(ctx, func(callCtx context.Context) error {
@@ -333,8 +333,6 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 
 const gatewayMutationRetryDelay = 2 * time.Second
 const gatewayMutationMaxAttempts = 20
-const pluginGatewayMutationTimeout = 90 * time.Second
-
 func isRetryableGatewayMutationError(err error) bool {
 	if err == nil {
 		return false
