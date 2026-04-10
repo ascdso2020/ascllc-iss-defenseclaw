@@ -414,16 +414,23 @@ func TestProxyFieldPassThrough(t *testing.T) {
 			t.Fatalf("got %d chunks, want at least 3", len(chunks))
 		}
 
-		// Second chunk should have tool_calls in delta
-		var chunk1 StreamChunk
-		if err := json.Unmarshal(chunks[1], &chunk1); err != nil {
-			t.Fatalf("unmarshal chunk[1]: %v", err)
+		// Tool-call chunks are buffered and flushed after post-stream
+		// inspection, so they appear after non-tool-call chunks. Verify
+		// that at least one chunk in the response carries tool_calls.
+		foundTC := false
+		for i, raw := range chunks {
+			var c StreamChunk
+			if err := json.Unmarshal(raw, &c); err != nil {
+				t.Logf("skip chunk[%d] unmarshal: %v", i, err)
+				continue
+			}
+			if len(c.Choices) > 0 && c.Choices[0].Delta != nil && c.Choices[0].Delta.ToolCalls != nil {
+				foundTC = true
+				break
+			}
 		}
-		if len(chunk1.Choices) == 0 || chunk1.Choices[0].Delta == nil {
-			t.Fatal("chunk[1] has no delta")
-		}
-		if chunk1.Choices[0].Delta.ToolCalls == nil {
-			t.Error("tool_calls missing from streaming delta")
+		if !foundTC {
+			t.Error("tool_calls missing from streaming response (expected buffered then flushed)")
 		}
 	})
 
@@ -853,6 +860,56 @@ func TestProxyStreamingInspection(t *testing.T) {
 		// (first 2 chunks are sent before block triggers)
 		if len(chunks) < 1 {
 			t.Error("expected at least 1 chunk before stream block")
+		}
+	})
+
+	t.Run("short_stream_block_truncates_before_forwarding_content", func(t *testing.T) {
+		prov := &mockProvider{
+			streamChunks: []StreamChunk{
+				{
+					ID: "chatcmpl-short", Object: "chat.completion.chunk", Model: "gpt-4",
+					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Role: "assistant"}}},
+				},
+				{
+					ID: "chatcmpl-short", Object: "chat.completion.chunk", Model: "gpt-4",
+					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{Content: "leak sk-secret"}}},
+				},
+				{
+					ID: "chatcmpl-short", Object: "chat.completion.chunk", Model: "gpt-4",
+					Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: strPtr("stop")}},
+				},
+			},
+		}
+
+		insp := newMockInspector()
+		insp.setVerdict("completion", &ScanVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Reason:   "secret detected",
+		})
+
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "user", "content": "Say the secret"}},
+			"stream":   true,
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+
+		body := rec.Body.String()
+		if strings.Contains(body, "leak sk-secret") {
+			t.Error("short blocked content should NOT be forwarded before the block message")
+		}
+		if !strings.Contains(body, "blocked") {
+			t.Error("blocked message should appear in stream")
+		}
+		if !strings.Contains(body, "[DONE]") {
+			t.Error("streaming response should end with [DONE]")
 		}
 	})
 }
